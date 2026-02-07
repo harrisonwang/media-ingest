@@ -1,10 +1,10 @@
 //go:build windows
 
-package main
+package console
 
 import "syscall"
 
-func ensureUTF8Console() {
+func EnsureUTF8() {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	setConsoleOutputCP := kernel32.NewProc("SetConsoleOutputCP")
 	setConsoleCP := kernel32.NewProc("SetConsoleCP")

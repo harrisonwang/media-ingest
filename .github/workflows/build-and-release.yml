@@ -1,0 +1,161 @@
+name: build-and-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            exe_ext: ""
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            exe_ext: ".exe"
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            exe_ext: ""
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            exe_ext: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Set version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build (slim)
+        shell: bash
+        run: |
+          mkdir -p dist
+          out="dist/mingest${{ matrix.exe_ext }}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/mingest
+
+      - name: Package slim (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          pkg="media-ingest_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_slim"
+          mkdir -p package out
+          cp "dist/mingest" "package/mingest"
+          cp README.md package/ || true
+          tar -C package -czf "out/${pkg}.tar.gz" .
+
+      - name: Package slim (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "media-ingest_${env:VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_slim"
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "dist\\mingest.exe" "package\\mingest.exe"
+          Copy-Item "README.md" "package\\README.md"
+          Compress-Archive -Path "package\\*" -DestinationPath "out\\$pkg.zip" -Force
+
+      - name: Upload artifact (slim)
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-ingest_${{ matrix.goos }}_${{ matrix.goarch }}_slim
+          path: |
+            out/*.tar.gz
+            out/*.zip
+
+      - name: Download tools for embedding
+        shell: bash
+        run: |
+          scripts/fetch-embed-tools.sh --os "${{ matrix.goos }}" --arch "${{ matrix.goarch }}"
+
+      - name: Build (bundled)
+        shell: bash
+        run: |
+          mkdir -p dist
+          out="dist/mingest-bundled${{ matrix.exe_ext }}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -tags embedtools -trimpath -ldflags "-s -w" -o "$out" ./cmd/mingest
+
+      - name: Package bundled (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          pkg="media-ingest_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_bundled"
+          rm -rf package
+          mkdir -p package out
+          cp "dist/mingest-bundled" "package/mingest"
+          cp README.md package/ || true
+          tar -C package -czf "out/${pkg}.tar.gz" .
+
+      - name: Package bundled (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "media-ingest_${env:VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_bundled"
+          Remove-Item -Recurse -Force package -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "dist\\mingest-bundled.exe" "package\\mingest.exe"
+          Copy-Item "README.md" "package\\README.md"
+          Compress-Archive -Path "package\\*" -DestinationPath "out\\$pkg.zip" -Force
+
+      - name: Upload artifact (bundled)
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-ingest_${{ matrix.goos }}_${{ matrix.goarch }}_bundled
+          path: |
+            out/*.tar.gz
+            out/*.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    name: release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          shopt -s nullglob
+          files=( *.zip *.tar.gz )
+          if ((${#files[@]} == 0)); then
+            echo "no artifacts found"
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*

@@ -1,7 +1,6 @@
-package main
+package embedtools
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,52 +9,11 @@ import (
 	"sync"
 )
 
-// 嵌入外部可执行文件
-// 将外部 exe 放在 embed/ 目录下，然后在这里声明嵌入
-// 注意：embed 指令必须在 var 声明之前，且只能嵌入文件，不能嵌入目录
-// 
-// 使用方法：
-// 1. 创建 embed/ 目录：mkdir -p embed
-// 2. 将要嵌入的文件放入 embed/ 目录
-// 3. 取消下面对应行的注释
-// 4. 在 embeddedBinaries map 中添加对应的条目
+// Optional embedded tool binaries.
 //
-// 示例（取消注释以启用嵌入）：
-// 注意：如果文件不存在，编译会失败。请先确保文件存在于 embed/ 目录中
-//
-// 步骤：
-// 1. 将外部 exe 放入 embed/ 目录（如 embed/yt-dlp, embed/ffmpeg）
-// 2. 取消下面对应行的注释
-// 3. 编译：go build -o youtube
-//
-// var embeddedYtDlp []byte   // 取消注释：//go:embed embed/yt-dlp
-// var embeddedFFmpeg []byte   // 取消注释：//go:embed embed/ffmpeg
-// var embeddedDeno []byte     // 取消注释：//go:embed embed/deno
-// var embeddedNode []byte     // 取消注释：//go:embed embed/node
-
-// 当前已嵌入文件（已启用）
-//go:embed embed/windows/yt-dlp.exe
-var embeddedYtDlp []byte
-//go:embed embed/windows/ffmpeg.exe
-var embeddedFFmpeg []byte
-//go:embed embed/windows/deno.exe
-var embeddedDeno []byte
-
-// 如果需要嵌入 node.exe，取消下面的注释：
-// //go:embed embed/windows/node.exe
-// var embeddedNode []byte
-
-// 当前未嵌入 node
-var embeddedNode []byte
-
-// embeddedBinaries 存储所有嵌入的二进制文件
-// 如果某个文件未嵌入（对应变量为空），程序会自动跳过，使用系统版本
-var embeddedBinaries = map[string][]byte{
-	"yt-dlp": embeddedYtDlp,
-	"ffmpeg": embeddedFFmpeg,
-	"deno":   embeddedDeno,
-	"node":   embeddedNode,
-}
+// Default builds do not embed any tools. When built with `-tags embedtools`,
+// platform-specific go:embed declarations (see assets_*.go) provide the bytes
+// for yt-dlp/ffmpeg/deno (and optionally node).
 
 var (
 	extractOnce sync.Once
@@ -63,7 +21,7 @@ var (
 	extractErr  error
 )
 
-// extractEmbeddedBinaries 提取嵌入的二进制文件到程序同目录
+// extractEmbeddedBinaries extracts embedded binaries to a writable directory.
 // 优先提取到程序同目录，如果不可写则回退到临时目录
 func extractEmbeddedBinaries() (string, error) {
 	extractOnce.Do(func() {
@@ -71,7 +29,7 @@ func extractEmbeddedBinaries() (string, error) {
 		exeDir, err := executableDirForEmbed()
 		if err == nil {
 			// 检查程序目录是否可写
-			testFile := filepath.Join(exeDir, ".youtube-cli-write-test")
+			testFile := filepath.Join(exeDir, ".media-ingest-write-test")
 			if err := os.WriteFile(testFile, []byte("test"), 0644); err == nil {
 				os.Remove(testFile) // 清理测试文件
 				extractDir = exeDir
@@ -84,7 +42,7 @@ func extractEmbeddedBinaries() (string, error) {
 		}
 
 		// 回退到临时目录
-		tmpDir, err := os.MkdirTemp("", "youtube-cli-embedded-*")
+		tmpDir, err := os.MkdirTemp("", "media-ingest-embedded-*")
 		if err != nil {
 			extractErr = fmt.Errorf("创建临时目录失败: %w", err)
 			return
@@ -135,8 +93,8 @@ func extractToDir(targetDir string) error {
 	return nil
 }
 
-// findEmbeddedBinary 查找嵌入的二进制文件
-func findEmbeddedBinary(name string) (string, bool) {
+// Find returns the extracted path for an embedded binary if it exists.
+func Find(name string) (string, bool) {
 	// 检查是否在嵌入列表中，且文件不为空
 	var embeddedName string
 	for k, data := range embeddedBinaries {
@@ -192,15 +150,15 @@ func executableDirForEmbed() (string, error) {
 	return filepath.Dir(exePath), nil
 }
 
-// cleanupEmbeddedBinaries 清理临时文件
+// Cleanup removes extracted temp files (only when extracted to a temp dir).
 // 注意：如果文件提取到程序同目录，不会自动删除（可缓存复用）
 // 只有提取到临时目录时才会清理
-func cleanupEmbeddedBinaries() {
+func Cleanup() {
 	if extractDir == "" {
 		return
 	}
 	
-	// 检查是否是临时目录（包含 "youtube-cli-embedded-" 且不在程序目录）
+	// 检查是否是临时目录（包含 "media-ingest-embedded-" 且不在程序目录）
 	exeDir, _ := executableDirForEmbed()
 	if exeDir != "" && extractDir == exeDir {
 		// 提取到程序目录，不删除（保留文件以便下次使用）
@@ -208,7 +166,7 @@ func cleanupEmbeddedBinaries() {
 	}
 	
 	// 是临时目录，清理它
-	if strings.Contains(extractDir, "youtube-cli-embedded-") {
+	if strings.Contains(extractDir, "media-ingest-embedded-") {
 		os.RemoveAll(extractDir)
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package ingest
 
 import (
 	"bytes"
@@ -12,6 +12,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"media-ingest/ingest/embedtools"
+	"media-ingest/ingest/platform/console"
 )
 
 const (
@@ -48,68 +51,55 @@ type authSource struct {
 	Value string
 }
 
-func main() {
+func Main(args []string) int {
 	log.SetFlags(0)
-	ensureUTF8Console()
-	
-	// 程序退出时清理嵌入的临时文件
-	defer cleanupEmbeddedBinaries()
+	console.EnsureUTF8()
+	defer embedtools.Cleanup()
 
-	if len(os.Args) == 2 && isHelpArg(os.Args[1]) {
+	if len(args) == 1 {
 		usage()
-		os.Exit(exitOK)
+		return exitUsage
 	}
-	if len(os.Args) == 2 && isAuthArg(os.Args[1]) {
-		os.Exit(runAuth())
-	}
-	if len(os.Args) != 2 {
+
+	if len(args) == 2 && isHelpArg(args[1]) {
 		usage()
-		os.Exit(exitUsage)
+		return exitOK
 	}
 
-	targetURL := os.Args[1]
-	if err := validateURL(targetURL); err != nil {
-		log.Printf("输入的 URL 无效: %v", err)
-		os.Exit(exitUsage)
-	}
-
-	found, err := detectDeps()
-	if err != nil {
-		var depErr dependencyError
-		if errors.As(err, &depErr) {
-			log.Print(depErr.Message)
-			os.Exit(depErr.ExitCode)
+	switch strings.ToLower(strings.TrimSpace(args[1])) {
+	case "get":
+		if len(args) != 3 {
+			usage()
+			return exitUsage
 		}
-		log.Printf("依赖检测失败: %v", err)
-		os.Exit(exitDownloadFailed)
+		return runGet(args[2])
+	case "auth", "login":
+		if len(args) != 2 {
+			usage()
+			return exitUsage
+		}
+		return runAuth()
+	default:
+		usage()
+		return exitUsage
 	}
-
-	authSources := buildAuthSources()
-
-	log.Printf("使用 yt-dlp: %s", found.YtDlp.Path)
-	log.Printf("使用 ffmpeg: %s", found.FFmpeg.Path)
-	log.Printf("使用 JS runtime: %s (%s)", found.JSRuntimeID, found.JSRuntime.Path)
-	log.Print("将使用浏览器 cookies（要求你已在浏览器登录 YouTube）")
-
-	exitCode := runWithAuthFallback(targetURL, found, authSources)
-	os.Exit(exitCode)
 }
 
 func usage() {
 	fmt.Println("用法:")
-	fmt.Println("  youtube <youtube_url>")
-	fmt.Println("  youtube auth")
+	fmt.Println("  mingest get <url>")
+	fmt.Println("  mingest auth")
 	fmt.Println()
 	fmt.Println("行为:")
 	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / deno|node")
 	fmt.Println("  - 自动从浏览器读取 cookies（默认优先 chrome）")
-	fmt.Println("  - 若浏览器 cookies 读取失败，可用 `youtube auth` 让 Chrome 自己提供登录态")
+	fmt.Println("  - 若浏览器 cookies 读取失败，可用 `mingest auth` 让 Chrome 自己提供登录态")
 	fmt.Println()
 	fmt.Println("可选环境变量:")
-	fmt.Println("  - YOUTUBE_BROWSER=chrome|firefox|chromium|edge")
-	fmt.Println("  - YOUTUBE_BROWSER_PROFILE=Default|Profile 1|...")
-	fmt.Println("  - YOUTUBE_JS_RUNTIME=node|deno")
-	fmt.Println("  - YOUTUBE_CHROME_PATH=C:\\\\Path\\\\To\\\\chrome.exe")
+	fmt.Println("  - MINGEST_BROWSER=chrome|firefox|chromium|edge")
+	fmt.Println("  - MINGEST_BROWSER_PROFILE=Default|Profile 1|...")
+	fmt.Println("  - MINGEST_JS_RUNTIME=node|deno")
+	fmt.Println("  - MINGEST_CHROME_PATH=C:\\\\Path\\\\To\\\\chrome.exe")
 	fmt.Println()
 	fmt.Println("退出码:")
 	fmt.Println("  - 20: 需要登录（AUTH_REQUIRED）")
@@ -129,13 +119,31 @@ func isHelpArg(v string) bool {
 	}
 }
 
-func isAuthArg(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "auth", "login":
-		return true
-	default:
-		return false
+func runGet(targetURL string) int {
+	if err := validateURL(targetURL); err != nil {
+		log.Printf("输入的 URL 无效: %v", err)
+		return exitUsage
 	}
+
+	found, err := detectDeps()
+	if err != nil {
+		var depErr dependencyError
+		if errors.As(err, &depErr) {
+			log.Print(depErr.Message)
+			return depErr.ExitCode
+		}
+		log.Printf("依赖检测失败: %v", err)
+		return exitDownloadFailed
+	}
+
+	authSources := buildAuthSources()
+
+	log.Printf("使用 yt-dlp: %s", found.YtDlp.Path)
+	log.Printf("使用 ffmpeg: %s", found.FFmpeg.Path)
+	log.Printf("使用 JS runtime: %s (%s)", found.JSRuntimeID, found.JSRuntime.Path)
+	log.Print("将使用浏览器 cookies（要求你已在浏览器登录目标网站）")
+
+	return runWithAuthFallback(targetURL, found, authSources)
 }
 
 func validateURL(raw string) error {
@@ -186,7 +194,7 @@ func detectDeps() (deps, error) {
 
 	jsID := ""
 	jsPath := ""
-	requestedRuntime := strings.ToLower(strings.TrimSpace(os.Getenv("YOUTUBE_JS_RUNTIME")))
+	requestedRuntime := strings.ToLower(strings.TrimSpace(os.Getenv("MINGEST_JS_RUNTIME")))
 	switch requestedRuntime {
 	case "":
 		// default: prefer deno first (bundled), then node
@@ -209,7 +217,7 @@ func detectDeps() (deps, error) {
 		}
 	default:
 		return deps{}, dependencyError{
-			Message:  fmt.Sprintf("无效的 YOUTUBE_JS_RUNTIME: %s（仅支持 node 或 deno）", requestedRuntime),
+			Message:  fmt.Sprintf("无效的 MINGEST_JS_RUNTIME: %s（仅支持 node 或 deno）", requestedRuntime),
 			ExitCode: exitRuntimeMissing,
 		}
 	}
@@ -239,7 +247,7 @@ func executableDir() (string, error) {
 
 func findBinary(name, preferredDir string) (string, bool) {
 	// 优先查找嵌入的二进制文件
-	if path, ok := findEmbeddedBinary(name); ok {
+	if path, ok := embedtools.Find(name); ok {
 		return path, true
 	}
 
@@ -325,7 +333,7 @@ func isRunnableFile(path string) bool {
 }
 
 func buildAuthSources() []authSource {
-	if v := strings.TrimSpace(os.Getenv("YOUTUBE_BROWSER")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("MINGEST_BROWSER")); v != "" {
 		lower := strings.ToLower(v)
 		return []authSource{{Kind: authKindBrowser, Value: lower}}
 	}
@@ -450,8 +458,8 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 		args := buildYtDlpArgs(targetURL, d, src)
 		code := runYtDlp(d, args)
 		if code == exitOK {
-			if i > 0 && strings.TrimSpace(os.Getenv("YOUTUBE_BROWSER")) == "" {
-				log.Printf("提示: 已自动切换并使用 %s 的登录态。可设置 YOUTUBE_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
+			if i > 0 && strings.TrimSpace(os.Getenv("MINGEST_BROWSER")) == "" {
+				log.Printf("提示: 已自动切换并使用 %s 的登录态。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
 			}
 			return code
 		}
@@ -463,9 +471,9 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 			if cdpCode == exitOK {
 				return exitOK
 			}
-			// If CDP profile is not logged in yet, guide the user to run `youtube auth`.
+			// If CDP profile is not logged in yet, guide the user to run `media-ingest auth`.
 			if cdpCode == exitAuthRequired {
-				log.Print("提示: 工具专用 Chrome profile 尚未登录。请先执行一次: youtube auth")
+				log.Print("提示: 工具专用 Chrome profile 尚未登录。请先执行一次: media-ingest auth")
 				// Keep classification as AUTH_REQUIRED so callers can decide what to do.
 				code = exitAuthRequired
 			} else if cdpCode == exitCookieProblem {
@@ -483,9 +491,9 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 	}
 
 	if shouldTryNextAuth(lastCode) {
-		log.Print("未能获取有效登录态。请先在浏览器登录 YouTube，然后重试。")
-		log.Print("若你实际登录在 Firefox，可尝试: YOUTUBE_BROWSER=firefox youtube <url>")
-		log.Print("或先执行一次: youtube auth")
+		log.Print("未能获取有效登录态。请先在浏览器登录目标网站，然后重试。")
+		log.Print("若你实际登录在 Firefox，可尝试: MINGEST_BROWSER=firefox mingest get <url>")
+		log.Print("或先执行一次: mingest auth")
 		return exitAuthRequired
 	}
 	return lastCode
@@ -509,7 +517,7 @@ func buildYtDlpArgs(targetURL string, d deps, src authSource) []string {
 	switch src.Kind {
 	case authKindBrowser:
 		browserArg := src.Value
-		if p := strings.TrimSpace(os.Getenv("YOUTUBE_BROWSER_PROFILE")); p != "" {
+		if p := strings.TrimSpace(os.Getenv("MINGEST_BROWSER_PROFILE")); p != "" {
 			browserArg = browserArg + ":" + p
 		}
 		args = append(args, "--cookies-from-browser", browserArg)
@@ -677,11 +685,11 @@ func classifyFailure(output string) (int, string) {
 	lower := strings.ToLower(output)
 
 	if strings.Contains(lower, "could not copy") && strings.Contains(lower, "cookie database") {
-		return exitCookieProblem, "浏览器 cookies 数据库无法读取。请先关闭浏览器后重试，或改用 Firefox，或执行 `youtube auth`。"
+		return exitCookieProblem, "浏览器 cookies 数据库无法读取。请先关闭浏览器后重试，或改用 Firefox，或执行 `media-ingest auth`。"
 	}
 
 	if strings.Contains(lower, "failed to decrypt with dpapi") {
-		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `youtube auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `media-ingest auth`。"
 	}
 
 	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "cookies") {
@@ -689,12 +697,12 @@ func classifyFailure(output string) (int, string) {
 	}
 
 	if strings.Contains(lower, "cannot decrypt v11 cookies: no key found") {
-		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `youtube auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `media-ingest auth`。"
 	}
 
 	if strings.Contains(lower, "sign in to confirm you're not a bot") ||
 		strings.Contains(lower, "sign in to confirm you’re not a bot") {
-		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `youtube auth`。"
+		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `media-ingest auth`。"
 	}
 
 	if strings.Contains(lower, "cookies file") && strings.Contains(lower, "netscape") {

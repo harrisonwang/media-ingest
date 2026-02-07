@@ -1,3 +1,3 @@
-module youtube-cli
+module media-ingest
 
 go 1.22
