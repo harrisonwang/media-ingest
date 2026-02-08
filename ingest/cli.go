@@ -36,6 +36,7 @@ type tool struct {
 type deps struct {
 	YtDlp       tool
 	FFmpeg      tool
+	FFprobe     tool
 	JSRuntime   tool
 	JSRuntimeID string
 }
@@ -91,7 +92,7 @@ func usage() {
 	fmt.Println("  mingest auth")
 	fmt.Println()
 	fmt.Println("行为:")
-	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / deno|node")
+	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / ffprobe / deno|node")
 	fmt.Println("  - 自动从浏览器读取 cookies（默认优先 chrome）")
 	fmt.Println("  - 若浏览器 cookies 读取失败，可用 `mingest auth` 让 Chrome 自己提供登录态")
 	fmt.Println()
@@ -140,6 +141,7 @@ func runGet(targetURL string) int {
 
 	log.Printf("使用 yt-dlp: %s", found.YtDlp.Path)
 	log.Printf("使用 ffmpeg: %s", found.FFmpeg.Path)
+	log.Printf("使用 ffprobe: %s", found.FFprobe.Path)
 	log.Printf("使用 JS runtime: %s (%s)", found.JSRuntimeID, found.JSRuntime.Path)
 	log.Print("将使用浏览器 cookies（要求你已在浏览器登录目标网站）")
 
@@ -194,6 +196,22 @@ func detectDeps() (deps, error) {
 		}
 	}
 
+	ffprobePath, ok := findBinary("ffprobe", wd, exeDir)
+	if !ok {
+		return deps{}, dependencyError{
+			Message:  "未找到 ffprobe。请将 ffprobe 与 ffmpeg 放在同一目录（工作目录或程序同目录），或加入 PATH。",
+			ExitCode: exitFFmpegMissing,
+		}
+	}
+
+	// yt-dlp expects ffmpeg/ffprobe to be discoverable together. We pass --ffmpeg-location as a directory.
+	if filepath.Dir(ffmpegPath) != filepath.Dir(ffprobePath) {
+		return deps{}, dependencyError{
+			Message:  fmt.Sprintf("检测到 ffmpeg 与 ffprobe 不在同一目录（ffmpeg=%s, ffprobe=%s）。请将它们放在同一目录，或改用 *_bundled。", ffmpegPath, ffprobePath),
+			ExitCode: exitFFmpegMissing,
+		}
+	}
+
 	jsID := ""
 	jsPath := ""
 	requestedRuntime := strings.ToLower(strings.TrimSpace(os.Getenv("MINGEST_JS_RUNTIME")))
@@ -234,6 +252,7 @@ func detectDeps() (deps, error) {
 	return deps{
 		YtDlp:       tool{Name: "yt-dlp", Path: ytPath},
 		FFmpeg:      tool{Name: "ffmpeg", Path: ffmpegPath},
+		FFprobe:     tool{Name: "ffprobe", Path: ffprobePath},
 		JSRuntime:   tool{Name: jsID, Path: jsPath},
 		JSRuntimeID: jsID,
 	}, nil
@@ -721,7 +740,11 @@ func classifyFailure(output string) (int, string) {
 	}
 
 	if strings.Contains(lower, "ffmpeg not found") {
-		return exitFFmpegMissing, "ffmpeg 不可用。请将 ffmpeg 放在程序同目录，或加入 PATH。"
+		return exitFFmpegMissing, "ffmpeg 不可用。请将 ffmpeg/ffprobe 放在同一目录（工作目录或程序同目录），或加入 PATH，或改用 *_bundled。"
+	}
+
+	if strings.Contains(lower, "ffprobe not found") {
+		return exitFFmpegMissing, "ffprobe 不可用。请将 ffmpeg/ffprobe 放在同一目录（工作目录或程序同目录），或加入 PATH，或改用 *_bundled。"
 	}
 
 	return exitDownloadFailed, "下载失败。可先执行 `yt-dlp -U` 更新，再检查 cookies 是否过期。"
