@@ -71,7 +71,7 @@ Windows 11 常见情况：
 - `-f "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best"`
 - `--merge-output-format mp4`
 
-## 退出码（给 Agent 用）
+## 退出码
 
 - `20` `AUTH_REQUIRED`：需要登录
 - `21` `COOKIE_PROBLEM`：cookies 读取/解密/数据库占用问题
