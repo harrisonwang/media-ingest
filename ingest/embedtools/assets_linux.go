@@ -2,29 +2,39 @@
 
 package embedtools
 
-import _ "embed"
+import (
+	"embed"
+	"strings"
+)
 
 // Linux embedded tools. These files are expected to exist at build time.
 //
 // Layout:
 //   assets/linux/yt-dlp
 //   assets/linux/ffmpeg
+//   assets/linux/ffprobe (optional but recommended)
 //   assets/linux/deno
 
-//go:embed assets/linux/yt-dlp
-var embeddedYtDlp []byte
+//go:embed assets/linux/*
+var embeddedFS embed.FS
 
-//go:embed assets/linux/ffmpeg
-var embeddedFFmpeg []byte
+var embeddedBinaries = map[string][]byte{}
 
-//go:embed assets/linux/deno
-var embeddedDeno []byte
-
-var embeddedNode []byte
-
-var embeddedBinaries = map[string][]byte{
-	"yt-dlp": embeddedYtDlp,
-	"ffmpeg": embeddedFFmpeg,
-	"deno":   embeddedDeno,
-	"node":   embeddedNode,
+func init() {
+	entries, err := embeddedFS.ReadDir("assets/linux")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		b, err := embeddedFS.ReadFile("assets/linux/" + name)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		key := strings.ToLower(name)
+		embeddedBinaries[key] = b
+	}
 }

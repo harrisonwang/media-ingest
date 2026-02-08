@@ -2,32 +2,41 @@
 
 package embedtools
 
-import _ "embed"
+import (
+	"embed"
+	"strings"
+)
 
 // Windows embedded tools. These files are expected to exist at build time.
 //
 // Layout:
 //   assets/windows/yt-dlp.exe
 //   assets/windows/ffmpeg.exe
+//   assets/windows/ffprobe.exe (optional but recommended)
 //   assets/windows/deno.exe
 
-//go:embed assets/windows/yt-dlp.exe
-var embeddedYtDlp []byte
+//go:embed assets/windows/*
+var embeddedFS embed.FS
 
-//go:embed assets/windows/ffmpeg.exe
-var embeddedFFmpeg []byte
+// embeddedBinaries is populated from embeddedFS at init time.
+// Keys are canonical tool names without extension (e.g. "ffmpeg", "ffprobe").
+var embeddedBinaries = map[string][]byte{}
 
-//go:embed assets/windows/deno.exe
-var embeddedDeno []byte
-
-// Optional: if you want to embed node.exe, add a new file with a build tag
-// (e.g. windows && embedtools && embednode) to avoid breaking builds when the
-// file is missing.
-var embeddedNode []byte
-
-var embeddedBinaries = map[string][]byte{
-	"yt-dlp": embeddedYtDlp,
-	"ffmpeg": embeddedFFmpeg,
-	"deno":   embeddedDeno,
-	"node":   embeddedNode,
+func init() {
+	entries, err := embeddedFS.ReadDir("assets/windows")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		b, err := embeddedFS.ReadFile("assets/windows/" + name)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSuffix(name, ".exe"))
+		embeddedBinaries[key] = b
+	}
 }

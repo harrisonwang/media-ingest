@@ -6,6 +6,7 @@ usage() {
 fetch-embed-tools.sh
 
 Downloads tool binaries into embed/<goos>/ for optional embedding (build tag: embedtools).
+Note: when fetching ffmpeg, this script also fetches ffprobe from the same build (if available).
 
 Examples:
   scripts/fetch-embed-tools.sh --os windows --arch amd64
@@ -166,22 +167,30 @@ fetch_deno() {
 
 fetch_ffmpeg() {
   local archive="${tmpdir}/ffmpeg"
-  local target="${out_dir}/ffmpeg"
+  local ffmpeg_target="${out_dir}/ffmpeg"
+  local ffprobe_target="${out_dir}/ffprobe"
 
   if [[ "${GOOS}" == "windows" ]]; then
-    target="${out_dir}/ffmpeg.exe"
+    ffmpeg_target="${out_dir}/ffmpeg.exe"
+    ffprobe_target="${out_dir}/ffprobe.exe"
     archive="${archive}.zip"
     # Static (non-shared) Windows build.
     download "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" "${archive}"
-    extract_zip_member "${archive}" "bin/ffmpeg.exe" "${target}"
+    extract_zip_member "${archive}" "bin/ffmpeg.exe" "${ffmpeg_target}"
+    extract_zip_member "${archive}" "bin/ffprobe.exe" "${ffprobe_target}"
   elif [[ "${GOOS}" == "darwin" ]]; then
     # BtbN/FFmpeg-Builds does not ship macOS artifacts. Use Martin Riedl's signed builds.
+    # Note: ffmpeg and ffprobe are shipped as separate zip files.
     # Scripting URLs documented on https://ffmpeg.martin-riedl.de/.
     archive="${archive}.zip"
+    local archive_probe="${tmpdir}/ffprobe.zip"
     local arch="${GOARCH}"
     download "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${arch}/release/ffmpeg.zip" "${archive}"
-    extract_zip_member "${archive}" "ffmpeg" "${target}"
-    chmod_x "${target}"
+    extract_zip_member "${archive}" "ffmpeg" "${ffmpeg_target}"
+    download "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${arch}/release/ffprobe.zip" "${archive_probe}"
+    extract_zip_member "${archive_probe}" "ffprobe" "${ffprobe_target}"
+    chmod_x "${ffmpeg_target}"
+    chmod_x "${ffprobe_target}"
   else
     local platform=""
     case "${GOOS}/${GOARCH}" in
@@ -197,14 +206,23 @@ fetch_ffmpeg() {
     mkdir -p "${xdir}"
     tar -C "${xdir}" -xf "${archive}"
 
-    local found=""
-    found="$(find "${xdir}" -type f -name ffmpeg -perm -u+x 2>/dev/null | head -n 1 || true)"
-    if [[ -z "${found}" ]]; then
-      found="$(find "${xdir}" -type f -name ffmpeg 2>/dev/null | head -n 1 || true)"
+    local ffmpeg_found=""
+    ffmpeg_found="$(find "${xdir}" -type f -name ffmpeg -perm -u+x 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${ffmpeg_found}" ]]; then
+      ffmpeg_found="$(find "${xdir}" -type f -name ffmpeg 2>/dev/null | head -n 1 || true)"
     fi
-    [[ -n "${found}" ]] || die "ffmpeg binary not found inside: ${archive}"
-    cp -f "${found}" "${target}"
-    chmod_x "${target}"
+    [[ -n "${ffmpeg_found}" ]] || die "ffmpeg binary not found inside: ${archive}"
+    cp -f "${ffmpeg_found}" "${ffmpeg_target}"
+    chmod_x "${ffmpeg_target}"
+
+    local ffprobe_found=""
+    ffprobe_found="$(find "${xdir}" -type f -name ffprobe -perm -u+x 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${ffprobe_found}" ]]; then
+      ffprobe_found="$(find "${xdir}" -type f -name ffprobe 2>/dev/null | head -n 1 || true)"
+    fi
+    [[ -n "${ffprobe_found}" ]] || die "ffprobe binary not found inside: ${archive}"
+    cp -f "${ffprobe_found}" "${ffprobe_target}"
+    chmod_x "${ffprobe_target}"
   fi
 }
 

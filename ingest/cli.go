@@ -176,7 +176,9 @@ func detectDeps() (deps, error) {
 	}
 	wd, _ := os.Getwd()
 
-	ytPath, ok := findBinary("yt-dlp", exeDir)
+	// Prefer current working directory (where users typically place the tool bundle),
+	// then the executable directory, then PATH.
+	ytPath, ok := findBinary("yt-dlp", wd, exeDir)
 	if !ok {
 		return deps{}, dependencyError{
 			Message:  "未找到 yt-dlp。请将 yt-dlp 放在程序同目录，或加入 PATH。",
@@ -184,7 +186,7 @@ func detectDeps() (deps, error) {
 		}
 	}
 
-	ffmpegPath, ok := findBinary("ffmpeg", exeDir)
+	ffmpegPath, ok := findBinary("ffmpeg", wd, exeDir)
 	if !ok {
 		return deps{}, dependencyError{
 			Message:  "未找到 ffmpeg。请将 ffmpeg 放在程序同目录，或加入 PATH。",
@@ -198,15 +200,15 @@ func detectDeps() (deps, error) {
 	switch requestedRuntime {
 	case "":
 		// default: prefer deno first (bundled), then node
-		if denoPath, exists := findBinaryPreferPath("deno", exeDir, wd); exists {
+		if denoPath, exists := findBinary("deno", wd, exeDir); exists {
 			jsID = "deno"
 			jsPath = denoPath
-		} else if nodePath, exists := findBinaryPreferPath("node", exeDir, wd); exists {
+		} else if nodePath, exists := findBinary("node", wd, exeDir); exists {
 			jsID = "node"
 			jsPath = nodePath
 		}
 	case "deno", "node":
-		if p, exists := findBinaryPreferPath(requestedRuntime, exeDir, wd); exists {
+		if p, exists := findBinary(requestedRuntime, wd, exeDir); exists {
 			jsID = requestedRuntime
 			jsPath = p
 		} else {
@@ -245,7 +247,7 @@ func executableDir() (string, error) {
 	return filepath.Dir(exePath), nil
 }
 
-func findBinary(name, preferredDir string) (string, bool) {
+func findBinary(name string, preferredDirs ...string) (string, bool) {
 	// 优先查找嵌入的二进制文件
 	if path, ok := embedtools.Find(name); ok {
 		return path, true
@@ -257,9 +259,14 @@ func findBinary(name, preferredDir string) (string, bool) {
 	}
 
 	for _, c := range candidates {
-		local := filepath.Join(preferredDir, c)
-		if isRunnableFile(local) {
-			return local, true
+		for _, dir := range preferredDirs {
+			if strings.TrimSpace(dir) == "" {
+				continue
+			}
+			local := filepath.Join(dir, c)
+			if isRunnableFile(local) {
+				return local, true
+			}
 		}
 	}
 
@@ -471,9 +478,9 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 			if cdpCode == exitOK {
 				return exitOK
 			}
-			// If CDP profile is not logged in yet, guide the user to run `media-ingest auth`.
+			// If CDP profile is not logged in yet, guide the user to run `mingest auth`.
 			if cdpCode == exitAuthRequired {
-				log.Print("提示: 工具专用 Chrome profile 尚未登录。请先执行一次: media-ingest auth")
+				log.Print("提示: 工具专用 Chrome profile 尚未登录。请先执行一次: mingest auth")
 				// Keep classification as AUTH_REQUIRED so callers can decide what to do.
 				code = exitAuthRequired
 			} else if cdpCode == exitCookieProblem {
@@ -685,11 +692,11 @@ func classifyFailure(output string) (int, string) {
 	lower := strings.ToLower(output)
 
 	if strings.Contains(lower, "could not copy") && strings.Contains(lower, "cookie database") {
-		return exitCookieProblem, "浏览器 cookies 数据库无法读取。请先关闭浏览器后重试，或改用 Firefox，或执行 `media-ingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 数据库无法读取。请先关闭浏览器后重试，或改用 Firefox，或执行 `mingest auth`。"
 	}
 
 	if strings.Contains(lower, "failed to decrypt with dpapi") {
-		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `media-ingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `mingest auth`。"
 	}
 
 	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "cookies") {
@@ -697,12 +704,12 @@ func classifyFailure(output string) (int, string) {
 	}
 
 	if strings.Contains(lower, "cannot decrypt v11 cookies: no key found") {
-		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `media-ingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `mingest auth`。"
 	}
 
 	if strings.Contains(lower, "sign in to confirm you're not a bot") ||
 		strings.Contains(lower, "sign in to confirm you’re not a bot") {
-		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `media-ingest auth`。"
+		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `mingest auth`。"
 	}
 
 	if strings.Contains(lower, "cookies file") && strings.Contains(lower, "netscape") {

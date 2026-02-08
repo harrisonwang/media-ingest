@@ -29,7 +29,7 @@ func extractEmbeddedBinaries() (string, error) {
 		exeDir, err := executableDirForEmbed()
 		if err == nil {
 			// 检查程序目录是否可写
-			testFile := filepath.Join(exeDir, ".media-ingest-write-test")
+			testFile := filepath.Join(exeDir, ".mingest-write-test")
 			if err := os.WriteFile(testFile, []byte("test"), 0644); err == nil {
 				os.Remove(testFile) // 清理测试文件
 				extractDir = exeDir
@@ -42,7 +42,7 @@ func extractEmbeddedBinaries() (string, error) {
 		}
 
 		// 回退到临时目录
-		tmpDir, err := os.MkdirTemp("", "media-ingest-embedded-*")
+		tmpDir, err := os.MkdirTemp("", "mingest-embedded-*")
 		if err != nil {
 			extractErr = fmt.Errorf("创建临时目录失败: %w", err)
 			return
@@ -72,7 +72,7 @@ func extractToDir(targetDir string) error {
 		}
 
 		outputPath := filepath.Join(targetDir, binaryName)
-		
+
 		// 检查文件是否已存在（避免重复提取）
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 			// 文件已存在，跳过提取
@@ -157,16 +157,16 @@ func Cleanup() {
 	if extractDir == "" {
 		return
 	}
-	
-	// 检查是否是临时目录（包含 "media-ingest-embedded-" 且不在程序目录）
+
+	// 检查是否是临时目录（包含 "mingest-embedded-" 且不在程序目录）
 	exeDir, _ := executableDirForEmbed()
 	if exeDir != "" && extractDir == exeDir {
 		// 提取到程序目录，不删除（保留文件以便下次使用）
 		return
 	}
-	
+
 	// 是临时目录，清理它
-	if strings.Contains(extractDir, "media-ingest-embedded-") {
+	if strings.Contains(extractDir, "mingest-embedded-") {
 		os.RemoveAll(extractDir)
 	}
 }

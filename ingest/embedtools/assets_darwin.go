@@ -2,29 +2,39 @@
 
 package embedtools
 
-import _ "embed"
+import (
+	"embed"
+	"strings"
+)
 
 // macOS embedded tools. These files are expected to exist at build time.
 //
 // Layout:
 //   assets/darwin/yt-dlp
 //   assets/darwin/ffmpeg
+//   assets/darwin/ffprobe (optional but recommended)
 //   assets/darwin/deno
 
-//go:embed assets/darwin/yt-dlp
-var embeddedYtDlp []byte
+//go:embed assets/darwin/*
+var embeddedFS embed.FS
 
-//go:embed assets/darwin/ffmpeg
-var embeddedFFmpeg []byte
+var embeddedBinaries = map[string][]byte{}
 
-//go:embed assets/darwin/deno
-var embeddedDeno []byte
-
-var embeddedNode []byte
-
-var embeddedBinaries = map[string][]byte{
-	"yt-dlp": embeddedYtDlp,
-	"ffmpeg": embeddedFFmpeg,
-	"deno":   embeddedDeno,
-	"node":   embeddedNode,
+func init() {
+	entries, err := embeddedFS.ReadDir("assets/darwin")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		b, err := embeddedFS.ReadFile("assets/darwin/" + name)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		key := strings.ToLower(name)
+		embeddedBinaries[key] = b
+	}
 }
