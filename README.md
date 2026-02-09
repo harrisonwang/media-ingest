@@ -1,22 +1,23 @@
 # media-ingest (mingest)
 
-一个 Media Ingestion 命令行工具。当前版本主要聚焦 **YouTube**：输入 URL，自动调用 `yt-dlp` 下载并合并为 `mp4`，并复用你浏览器里的登录状态，以降低用户的使用成本。
+一个 Media Ingestion 命令行工具：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。对需要登录/会员/验证的内容，提供一键 `auth` 交互登录 + cookies 缓存能力，降低使用门槛。
 
 ```bash
 mingest get "https://www.youtube.com/watch?v=duZDsG3tvoA"
+mingest get "https://www.bilibili.com/bangumi/play/ss143815"
 ```
 
 说明：
 
-- 站点支持最终取决于 `yt-dlp` 本身；本项目会逐步补齐多站点的“鉴权/可观测/沙箱化”等能力。
-- 目前 cookie/登录态相关逻辑主要针对 YouTube 进行了适配，后续会扩展到 B 站等站点。
+- 站点/格式支持最终取决于 `yt-dlp` 本身
+- 当前内置平台：`youtube`、`bilibili`
 
 ## 能做什么
 
 - 自动检测并调用：`yt-dlp`、`ffmpeg`/`ffprobe`、`deno|node`
 - 默认下载并合并为 `mp4`，附带元数据并嵌入封面
-- 自动维护 **cookies 缓存**（优先使用；必要时从浏览器读取 cookies 刷新登录态）
-- Windows 11 下 Chrome cookies 读取/解密失败时：自动尝试 **CDP**（让 Chrome 自己把已解密 cookies 交给工具）
+- 自动维护 **cookies 缓存**（优先使用；必要时从浏览器读取 cookies 刷新登录状态）
+- Windows 下 Chrome cookies 读取失败时：自动尝试 **CDP**（让 Chrome 在进程内导出明文 cookies，避免读取/解密数据库）
 
 ## 安装
 
@@ -25,28 +26,45 @@ mingest get "https://www.youtube.com/watch?v=duZDsG3tvoA"
 - `*_slim`：不内置工具，需要你自己装 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno|node`
 - `*_bundled`：内置 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno`（开箱即用，体积更大）
 
-## 快速开始
+## 用法
 
-1. 下载：
+下载：
 
 ```bash
 mingest get "<url>"
 ```
 
-2. 若遇到需要登录/年龄确认等限制内容，先准备 YouTube 登录态（可选但推荐）：
+交互登录（一次性准备登录信息，写入 cookies 缓存）：
 
 ```bash
-mingest auth youtube
+mingest auth <platform>
 ```
 
-## 登录态与 cookies（自动模式）
+支持的平台：
 
-默认行为：
+- `youtube`
+- `bilibili`
 
-- 优先使用 cookies 缓存文件（位于用户配置目录下的 `mingest/youtube-cookies.txt`；Windows 使用 LocalAppData）
-- 若缓存失效/缺失：再按顺序从浏览器读取并刷新（默认顺序 `chrome -> firefox/chromium/edge`，失败会自动切换）
+## 登录信息与 cookies（自动模式）
 
-Windows 11 常见情况：
+cookies 缓存文件（按平台分别保存）：
+
+- Windows：`%LOCALAPPDATA%\\mingest\\youtube-cookies.txt` / `%LOCALAPPDATA%\\mingest\\bilibili-cookies.txt`
+- macOS / Linux：位于 `os.UserConfigDir()/mingest/` 下的同名文件
+
+默认行为（每次 `mingest get`）：
+
+- 优先使用 cookies 缓存（避免频繁读取浏览器数据）
+- 若缓存失效/缺失：按顺序从浏览器读取并刷新（默认顺序 `chrome -> firefox -> chromium -> edge`，失败会自动切换）
+- 为避免“未登录的浏览器覆盖掉已登录缓存”，浏览器导出的 cookies 会先写入临时文件；检测到有效登录信号后才会更新缓存
+
+`mingest auth <platform>` 行为：
+
+- 启动一个工具专用的 Chrome profile（位于状态目录下的 `mingest/chrome-profile`）
+- 你在弹出的 Chrome 窗口完成登录后回到终端按回车
+- 工具从 Chrome 进程内导出 cookies，写入该平台的 cookies 缓存文件
+
+Windows 常见情况：
 
 - `--cookies-from-browser chrome` 可能因为数据库锁定 / DPAPI / App-Bound Encryption 失败
 - 工具会在 Chrome 失败后自动走 CDP（无需 DPAPI 解密）
@@ -88,15 +106,16 @@ Windows 11 常见情况：
 
 ## 常见问题
 
-1. `Sign in to confirm you’re not a bot`
+1. 提示需要登录/会员/验证
 
-- 这通常与 IP/网络风控有关，和“浏览器能播放视频”不等价
-- 请先在浏览器中完成登录/验证后重试；必要时更换网络环境或切换浏览器（见 `MINGEST_BROWSER`）
+- 先在浏览器确认账号可正常观看
+- 再执行：`mingest auth youtube` / `mingest auth bilibili`
+- 若是“额外确认”（例如年龄确认/风险提示/会员提示），建议在 `auth` 打开的窗口中打开目标视频并完成确认后再回车
 
 2. Windows：`Could not copy Chrome cookie database` / `Failed to decrypt with DPAPI`
 
 - 这是 Chrome 数据库锁定或加密策略导致，工具会自动尝试 CDP
-- 若仍失败：请先关闭浏览器后重试，或切换到 Firefox（见 `MINGEST_BROWSER=firefox`）
+- 若仍失败：请先彻底退出浏览器后重试，或切换到 Firefox（见 `MINGEST_BROWSER=firefox`）
 
 3. Linux：提示 `ffprobe not found`
 
@@ -123,3 +142,4 @@ go build -tags embedtools -o dist/mingest ./cmd/mingest
 - 工具下载目录：`ingest/embedtools/assets/<goos>/`
 - 获取 `ffmpeg` 时会一并获取 `ffprobe`
 - GitHub Actions 工作流见 `.github/workflows/build-and-release.yml`
+
