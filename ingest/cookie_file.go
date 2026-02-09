@@ -10,11 +10,16 @@ import (
 	"time"
 )
 
-// filterYouTubeCookieFile rewrites a Netscape cookie file, keeping only cookies for
-// youtube.com and google.com (including subdomains). It is intended to reduce the
-// amount of unrelated browser data we persist when we ask yt-dlp to dump cookies.
-func filterYouTubeCookieFile(path string) error {
-	return filterNetscapeCookieFile(path, isYouTubeRelatedDomain)
+func filterCookieFileForPlatform(path string, p videoPlatform) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	// If not configured, don't filter (privacy vs. correctness trade-off).
+	// We only persist filtered cookies for known platforms.
+	if strings.TrimSpace(p.ID) == "" || len(p.CookieDomainSuffixes) == 0 {
+		return nil
+	}
+	return filterNetscapeCookieFile(path, p.AllowsCookieDomain)
 }
 
 func filterNetscapeCookieFile(path string, allowDomain func(string) bool) error {
@@ -146,7 +151,14 @@ func createTempCookieJarFile(dir string) (string, func(), error) {
 	return path, cleanup, nil
 }
 
-func cookieFileLooksLikeLoggedIn(path string) (bool, error) {
+func cookieFileLooksLikeAuthenticated(path string, p videoPlatform) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	if len(p.AuthCookieNames) == 0 {
+		return false, nil
+	}
+
 	in, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -178,14 +190,12 @@ func cookieFileLooksLikeLoggedIn(path string) (bool, error) {
 		name := parts[5]
 		value := parts[6]
 
-		d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
-		if !strings.HasSuffix(d, "google.com") && !strings.HasSuffix(d, "youtube.com") {
+		if !p.AllowsCookieDomain(domain) {
 			continue
 		}
 
-		switch name {
-		case "SAPISID", "SID", "__Secure-3PSID", "__Secure-1PSID":
-			if strings.TrimSpace(value) != "" {
+		for _, want := range p.AuthCookieNames {
+			if name == want && strings.TrimSpace(value) != "" {
 				return true, nil
 			}
 		}

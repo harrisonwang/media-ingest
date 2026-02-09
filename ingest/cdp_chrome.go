@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-func runAuth() int {
+func runAuth(platform videoPlatform) int {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
 		log.Print(err.Error())
@@ -39,21 +39,25 @@ func runAuth() int {
 
 	log.Printf("将使用 Chrome: %s", chromePath)
 	log.Printf("将使用 profile: %s", profileDir)
-	log.Print("即将打开 Chrome 窗口，请在窗口中登录 YouTube。完成后回到终端按回车继续。")
+	name := platform.Name
+	if strings.TrimSpace(name) == "" {
+		name = platform.ID
+	}
+	log.Printf("即将打开 Chrome 窗口，请在窗口中登录 %s。完成后回到终端按回车继续。", name)
 
-	cookies, err := chromeAuthViaCDP(chromePath, profileDir)
+	cookies, err := chromeAuthViaCDP(chromePath, profileDir, platform)
 	if err != nil {
 		log.Printf("登录失败: %v", err)
 		return exitAuthRequired
 	}
 
-	cookiePath, err := youtubeCookiesFilePath()
+	cookiePath, err := cookiesCacheFilePath(platform)
 	if err != nil {
 		log.Printf("无法确定 cookies 保存路径: %v", err)
 		return exitCookieProblem
 	}
 	// Best effort: keep the cookie file private. Windows ignores chmod.
-	if err := writeNetscapeCookieFile(cookiePath, cookies); err != nil {
+	if err := writeNetscapeCookieFile(cookiePath, cookies, platform.AllowsCookieDomain); err != nil {
 		log.Printf("保存 cookies 失败: %v", err)
 		return exitCookieProblem
 	}
@@ -63,7 +67,7 @@ func runAuth() int {
 	return exitOK
 }
 
-func tryDownloadWithChromeCDP(targetURL string, d deps, cookieCacheFile string) int {
+func tryDownloadWithChromeCDP(targetURL string, d deps, platform videoPlatform, cookieCacheFile string) int {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
 		log.Print(err.Error())
@@ -75,14 +79,14 @@ func tryDownloadWithChromeCDP(targetURL string, d deps, cookieCacheFile string) 
 		return exitCookieProblem
 	}
 
-	cookieFile, cleanup, cookies, err := exportCookiesFromChromeCDP(chromePath, profileDir, true)
+	cookieFile, cleanup, cookies, err := exportCookiesFromChromeCDP(chromePath, profileDir, platform, true)
 	if err != nil {
 		log.Printf("无法从 Chrome 获取 cookies: %v", err)
 		return exitCookieProblem
 	}
 	defer cleanup()
 
-	if !looksLikeLoggedIn(cookies) {
+	if !looksLikeLoggedIn(cookies, platform) {
 		// This is a stronger signal than inferring from yt-dlp output: we didn't even get auth cookies.
 		return exitAuthRequired
 	}
@@ -90,13 +94,13 @@ func tryDownloadWithChromeCDP(targetURL string, d deps, cookieCacheFile string) 
 	// Best-effort: refresh the persistent cache so subsequent `mingest get` runs can use it directly.
 	if strings.TrimSpace(cookieCacheFile) != "" {
 		_ = os.MkdirAll(filepath.Dir(cookieCacheFile), 0o700)
-		if err := writeNetscapeCookieFile(cookieCacheFile, cookies); err == nil {
+		if err := writeNetscapeCookieFile(cookieCacheFile, cookies, platform.AllowsCookieDomain); err == nil {
 			_ = os.Chmod(cookieCacheFile, 0o600)
 		}
 	}
 
 	args := buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile)
-	return runYtDlp(d, args)
+	return runYtDlp(d, args, platform)
 }
 
 func chromeProfileDir() (string, error) {
@@ -169,10 +173,14 @@ type chromeCookie struct {
 	Secure  bool    `json:"secure"`
 }
 
-func exportCookiesFromChromeCDP(chromePath, profileDir string, headless bool) (string, func(), []chromeCookie, error) {
+func exportCookiesFromChromeCDP(chromePath, profileDir string, platform videoPlatform, headless bool) (string, func(), []chromeCookie, error) {
 	// Start Chrome with our managed profile and export cookies from inside Chrome (no SQLite access).
-	// Opening YouTube helps ensure the profile cookie store is initialized before we read it.
-	proc, port, stop, err := startChrome(chromePath, profileDir, headless, "https://www.youtube.com")
+	// Opening the target site helps ensure the profile cookie store is initialized before we read it.
+	openURL := strings.TrimSpace(platform.LoginURL)
+	if openURL == "" {
+		openURL = "about:blank"
+	}
+	proc, port, stop, err := startChrome(chromePath, profileDir, headless, openURL)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -200,7 +208,7 @@ func exportCookiesFromChromeCDP(chromePath, profileDir string, headless bool) (s
 	path := f.Name()
 	_ = f.Close()
 
-	if err := writeNetscapeCookieFile(path, cookies); err != nil {
+	if err := writeNetscapeCookieFile(path, cookies, platform.AllowsCookieDomain); err != nil {
 		_ = os.Remove(path)
 		return "", nil, nil, err
 	}
@@ -209,8 +217,12 @@ func exportCookiesFromChromeCDP(chromePath, profileDir string, headless bool) (s
 	return path, cleanup, cookies, nil
 }
 
-func chromeAuthViaCDP(chromePath, profileDir string) ([]chromeCookie, error) {
-	proc, port, stop, err := startChrome(chromePath, profileDir, false, "https://www.youtube.com")
+func chromeAuthViaCDP(chromePath, profileDir string, platform videoPlatform) ([]chromeCookie, error) {
+	openURL := strings.TrimSpace(platform.LoginURL)
+	if openURL == "" {
+		openURL = "about:blank"
+	}
+	proc, port, stop, err := startChrome(chromePath, profileDir, false, openURL)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +233,7 @@ func chromeAuthViaCDP(chromePath, profileDir string) ([]chromeCookie, error) {
 		return nil, err
 	}
 
-	log.Print("提示: 若你要下载需要年龄确认的视频，请在该 Chrome 窗口中打开目标视频并完成确认后，再回到终端按回车。")
+	log.Print("提示: 若你要下载需要额外确认/会员等限制内容，请在该 Chrome 窗口中打开目标视频并完成确认后，再回到终端按回车。")
 
 	reader := bufio.NewReader(os.Stdin)
 	_, _ = reader.ReadString('\n')
@@ -234,30 +246,22 @@ func chromeAuthViaCDP(chromePath, profileDir string) ([]chromeCookie, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !looksLikeLoggedIn(cookies) {
+	if !looksLikeLoggedIn(cookies, platform) {
 		return nil, errors.New("未检测到有效登录 cookies（可能未登录或未完成验证）")
 	}
 	return cookies, nil
 }
 
-func youtubeCookiesFilePath() (string, error) {
-	base, err := appStateDir()
-	if err != nil {
-		return "", err
+func looksLikeLoggedIn(cookies []chromeCookie, platform videoPlatform) bool {
+	if len(platform.AuthCookieNames) == 0 {
+		return false
 	}
-	// Keep the filename stable so `mingest get` can reuse it without having to keep Chrome running.
-	return filepath.Join(base, "youtube-cookies.txt"), nil
-}
-
-func looksLikeLoggedIn(cookies []chromeCookie) bool {
 	for _, c := range cookies {
-		d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(c.Domain)), ".")
-		if !strings.HasSuffix(d, "google.com") && !strings.HasSuffix(d, "youtube.com") {
+		if !platform.AllowsCookieDomain(c.Domain) {
 			continue
 		}
-		switch c.Name {
-		case "SAPISID", "SID", "__Secure-3PSID", "__Secure-1PSID":
-			if c.Value != "" {
+		for _, want := range platform.AuthCookieNames {
+			if c.Name == want && c.Value != "" {
 				return true
 			}
 		}
@@ -265,7 +269,7 @@ func looksLikeLoggedIn(cookies []chromeCookie) bool {
 	return false
 }
 
-func writeNetscapeCookieFile(path string, cookies []chromeCookie) error {
+func writeNetscapeCookieFile(path string, cookies []chromeCookie, allowDomain func(string) bool) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -276,7 +280,7 @@ func writeNetscapeCookieFile(path string, cookies []chromeCookie) error {
 	_, _ = fmt.Fprintln(f, "# This file was generated by mingest. DO NOT EDIT.")
 
 	for _, c := range cookies {
-		if !isYouTubeRelatedDomain(c.Domain) {
+		if allowDomain != nil && !allowDomain(c.Domain) {
 			continue
 		}
 		domain := c.Domain
@@ -307,11 +311,6 @@ func writeNetscapeCookieFile(path string, cookies []chromeCookie) error {
 	}
 
 	return nil
-}
-
-func isYouTubeRelatedDomain(domain string) bool {
-	d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
-	return strings.HasSuffix(d, "youtube.com") || strings.HasSuffix(d, "google.com")
 }
 
 func startChrome(chromePath, profileDir string, headless bool, openURL string) (*os.Process, int, func(), error) {
