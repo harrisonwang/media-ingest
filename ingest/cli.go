@@ -99,6 +99,7 @@ func usage() {
 	fmt.Println()
 	fmt.Println("平台:")
 	fmt.Println("  - youtube")
+	fmt.Println("  - bilibili")
 	fmt.Println()
 	fmt.Println("行为:")
 	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / ffprobe / deno|node")
@@ -889,6 +890,23 @@ func classifyFailure(output string, platform videoPlatform) (int, string) {
 			target = name
 		}
 		return exitAuthRequired, fmt.Sprintf("需要登录 %s 并完成额外确认。请在浏览器中登录并打开该视频完成确认后重试；或执行 `%s` 使用工具专用登录态。", target, authCmd)
+	}
+
+	// Generic "cookies suggested" auth-required detection for other extractors (e.g. bilibili).
+	// Many sites use wording like: "you have to login ... Use --cookies-from-browser or --cookies for the authentication".
+	if strings.Contains(lower, "use --cookies-from-browser") || strings.Contains(lower, "use --cookies") {
+		if strings.Contains(lower, "login") ||
+			strings.Contains(lower, "sign in") ||
+			strings.Contains(lower, "premium member") ||
+			strings.Contains(lower, "members only") ||
+			strings.Contains(lower, "members-only") ||
+			strings.Contains(lower, "authentication") {
+			target := "目标网站"
+			if name != "" {
+				target = name
+			}
+			return exitAuthRequired, fmt.Sprintf("需要登录 %s（或账号具备相应权限）。请先在浏览器中登录后重试；或执行 `%s`。", target, authCmd)
+		}
 	}
 
 	if strings.Contains(lower, "cookies file") && strings.Contains(lower, "netscape") {

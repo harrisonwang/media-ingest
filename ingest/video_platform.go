@@ -77,6 +77,7 @@ func (p videoPlatform) HasAuthSignals() bool {
 func supportedPlatforms() []videoPlatform {
 	return []videoPlatform{
 		youtubePlatform(),
+		bilibiliPlatform(),
 	}
 }
 
