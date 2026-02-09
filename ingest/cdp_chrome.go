@@ -41,15 +41,29 @@ func runAuth() int {
 	log.Printf("将使用 profile: %s", profileDir)
 	log.Print("即将打开 Chrome 窗口，请在窗口中登录 YouTube。完成后回到终端按回车继续。")
 
-	if err := chromeAuthViaCDP(chromePath, profileDir); err != nil {
+	cookies, err := chromeAuthViaCDP(chromePath, profileDir)
+	if err != nil {
 		log.Printf("登录失败: %v", err)
 		return exitAuthRequired
 	}
+
+	cookiePath, err := youtubeCookiesFilePath()
+	if err != nil {
+		log.Printf("无法确定 cookies 保存路径: %v", err)
+		return exitCookieProblem
+	}
+	// Best effort: keep the cookie file private. Windows ignores chmod.
+	if err := writeNetscapeCookieFile(cookiePath, cookies); err != nil {
+		log.Printf("保存 cookies 失败: %v", err)
+		return exitCookieProblem
+	}
+	_ = os.Chmod(cookiePath, 0o600)
+
 	log.Print("登录态已准备好。")
 	return exitOK
 }
 
-func tryDownloadWithChromeCDP(targetURL string, d deps) int {
+func tryDownloadWithChromeCDP(targetURL string, d deps, cookieCacheFile string) int {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
 		log.Print(err.Error())
@@ -61,12 +75,25 @@ func tryDownloadWithChromeCDP(targetURL string, d deps) int {
 		return exitCookieProblem
 	}
 
-	cookieFile, cleanup, err := exportCookiesFromChromeCDP(chromePath, profileDir, true)
+	cookieFile, cleanup, cookies, err := exportCookiesFromChromeCDP(chromePath, profileDir, true)
 	if err != nil {
 		log.Printf("无法从 Chrome 获取 cookies: %v", err)
 		return exitCookieProblem
 	}
 	defer cleanup()
+
+	if !looksLikeLoggedIn(cookies) {
+		// This is a stronger signal than inferring from yt-dlp output: we didn't even get auth cookies.
+		return exitAuthRequired
+	}
+
+	// Best-effort: refresh the persistent cache so subsequent `mingest get` runs can use it directly.
+	if strings.TrimSpace(cookieCacheFile) != "" {
+		_ = os.MkdirAll(filepath.Dir(cookieCacheFile), 0o700)
+		if err := writeNetscapeCookieFile(cookieCacheFile, cookies); err == nil {
+			_ = os.Chmod(cookieCacheFile, 0o600)
+		}
+	}
 
 	args := buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile)
 	return runYtDlp(d, args)
@@ -142,69 +169,84 @@ type chromeCookie struct {
 	Secure  bool    `json:"secure"`
 }
 
-func exportCookiesFromChromeCDP(chromePath, profileDir string, headless bool) (string, func(), error) {
+func exportCookiesFromChromeCDP(chromePath, profileDir string, headless bool) (string, func(), []chromeCookie, error) {
 	// Start Chrome with our managed profile and export cookies from inside Chrome (no SQLite access).
-	proc, port, stop, err := startChrome(chromePath, profileDir, headless, "about:blank")
+	// Opening YouTube helps ensure the profile cookie store is initialized before we read it.
+	proc, port, stop, err := startChrome(chromePath, profileDir, headless, "https://www.youtube.com")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer stop()
 
 	wsURL, err := waitForFirstPageWSURL(port, 15*time.Second)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
+
+	// Give Chrome a moment to finish initializing the cookie store for the profile.
+	time.Sleep(500 * time.Millisecond)
 
 	cookies, err := cdpGetAllCookies(wsURL)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	_ = proc // proc is kept to ensure Chrome stays alive until cookies are fetched.
 
 	f, err := os.CreateTemp("", "mingest-cookies-*.txt")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	path := f.Name()
 	_ = f.Close()
 
 	if err := writeNetscapeCookieFile(path, cookies); err != nil {
 		_ = os.Remove(path)
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	cleanup := func() { _ = os.Remove(path) }
-	return path, cleanup, nil
+	return path, cleanup, cookies, nil
 }
 
-func chromeAuthViaCDP(chromePath, profileDir string) error {
+func chromeAuthViaCDP(chromePath, profileDir string) ([]chromeCookie, error) {
 	proc, port, stop, err := startChrome(chromePath, profileDir, false, "https://www.youtube.com")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer stop()
 	_ = proc
 
 	if err := waitForDevTools(port, 15*time.Second); err != nil {
-		return err
+		return nil, err
 	}
+
+	log.Print("提示: 若你要下载需要年龄确认的视频，请在该 Chrome 窗口中打开目标视频并完成确认后，再回到终端按回车。")
 
 	reader := bufio.NewReader(os.Stdin)
 	_, _ = reader.ReadString('\n')
 
 	wsURL, err := waitForFirstPageWSURL(port, 5*time.Second)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cookies, err := cdpGetAllCookies(wsURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !looksLikeLoggedIn(cookies) {
-		return errors.New("未检测到有效登录 cookies（可能未登录或未完成验证）")
+		return nil, errors.New("未检测到有效登录 cookies（可能未登录或未完成验证）")
 	}
-	return nil
+	return cookies, nil
+}
+
+func youtubeCookiesFilePath() (string, error) {
+	base, err := appStateDir()
+	if err != nil {
+		return "", err
+	}
+	// Keep the filename stable so `mingest get` can reuse it without having to keep Chrome running.
+	return filepath.Join(base, "youtube-cookies.txt"), nil
 }
 
 func looksLikeLoggedIn(cookies []chromeCookie) bool {

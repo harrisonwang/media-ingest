@@ -75,11 +75,17 @@ func Main(args []string) int {
 		}
 		return runGet(args[2])
 	case "auth", "login":
-		if len(args) != 2 {
+		if len(args) != 3 {
 			usage()
 			return exitUsage
 		}
-		return runAuth()
+		switch strings.ToLower(strings.TrimSpace(args[2])) {
+		case "youtube":
+			return runAuth()
+		default:
+			usage()
+			return exitUsage
+		}
 	default:
 		usage()
 		return exitUsage
@@ -89,12 +95,12 @@ func Main(args []string) int {
 func usage() {
 	fmt.Println("用法:")
 	fmt.Println("  mingest get <url>")
-	fmt.Println("  mingest auth")
+	fmt.Println("  mingest auth youtube")
 	fmt.Println()
 	fmt.Println("行为:")
 	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / ffprobe / deno|node")
-	fmt.Println("  - 自动从浏览器读取 cookies（默认优先 chrome）")
-	fmt.Println("  - 若浏览器 cookies 读取失败，可用 `mingest auth` 让 Chrome 自己提供登录态")
+	fmt.Println("  - 自动维护 cookies 缓存（优先使用；必要时从浏览器读取 cookies 刷新登录态）")
+	fmt.Println("  - 若 Windows 下 Chrome cookies 读取/解密失败，可用 `mingest auth youtube`（CDP）准备工具专用登录态")
 	fmt.Println()
 	fmt.Println("可选环境变量:")
 	fmt.Println("  - MINGEST_BROWSER=chrome|firefox|chromium|edge")
@@ -138,14 +144,25 @@ func runGet(targetURL string) int {
 	}
 
 	authSources := buildAuthSources()
+	cookieFile, err := youtubeCookiesFilePath()
+	if err != nil {
+		log.Printf("无法确定 cookies 缓存路径: %v", err)
+		cookieFile = ""
+	} else {
+		// Ensure app state dir exists so yt-dlp can dump the cookie jar.
+		_ = os.MkdirAll(filepath.Dir(cookieFile), 0o700)
+	}
 
 	log.Printf("使用 yt-dlp: %s", found.YtDlp.Path)
 	log.Printf("使用 ffmpeg: %s", found.FFmpeg.Path)
 	log.Printf("使用 ffprobe: %s", found.FFprobe.Path)
 	log.Printf("使用 JS runtime: %s (%s)", found.JSRuntimeID, found.JSRuntime.Path)
-	log.Print("将使用浏览器 cookies（要求你已在浏览器登录目标网站）")
+	if strings.TrimSpace(cookieFile) != "" {
+		log.Printf("将使用 cookies 缓存: %s", cookieFile)
+	}
+	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新登录态")
 
-	return runWithAuthFallback(targetURL, found, authSources)
+	return runWithAuthFallback(targetURL, found, authSources, cookieFile)
 }
 
 func validateURL(raw string) error {
@@ -473,7 +490,34 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
+func fileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func runWithAuthFallback(targetURL string, d deps, sources []authSource, cookieFile string) int {
+	// 0) Fast path: try cached cookies first (no browser DB access).
+	if strings.TrimSpace(cookieFile) != "" {
+		log.Print("认证方式: cookies 缓存 (本地)")
+		code := runYtDlp(d, buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile))
+		// Always attempt to filter after yt-dlp touches the cookie jar.
+		if fileExists(cookieFile) {
+			if err := filterYouTubeCookieFile(cookieFile); err != nil {
+				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+			}
+		}
+		if code == exitOK {
+			return exitOK
+		}
+		// If it's not an auth/cookie issue, browser fallbacks won't help.
+		if !shouldTryNextAuth(code) {
+			return code
+		}
+	}
+
 	if len(sources) == 0 {
 		return exitAuthRequired
 	}
@@ -481,8 +525,48 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 	lastCode := exitDownloadFailed
 	for i, src := range sources {
 		log.Printf("认证方式 (%d/%d): %s", i+1, len(sources), authSourceLabel(src))
-		args := buildYtDlpArgs(targetURL, d, src)
+		args := []string{}
+		tmpCookieFile := ""
+		tmpCleanup := func() {}
+		// IMPORTANT:
+		// yt-dlp's --cookies FILE is both an input and an output (it "dumps cookie jar" back).
+		// If we pass the persistent cache file when extracting from a browser, an unauthenticated
+		// browser (e.g. Edge not logged in) can overwrite the cache and break subsequent runs.
+		//
+		// To prevent this, browser-based attempts use a temp cookie jar file and only promote it
+		// to the persistent cache if it looks authenticated.
+		if strings.TrimSpace(cookieFile) != "" && src.Kind == authKindBrowser {
+			dir := filepath.Dir(cookieFile)
+			p, cleanup, err := createTempCookieJarFile(dir)
+			if err == nil {
+				tmpCookieFile = p
+				tmpCleanup = cleanup
+				args = buildYtDlpArgsWithCookieCache(targetURL, d, src, tmpCookieFile)
+			} else {
+				// Fallback: proceed without temp jar; this loses caching but keeps functionality.
+				args = buildYtDlpArgs(targetURL, d, src)
+			}
+		} else {
+			args = buildYtDlpArgsWithCookieCache(targetURL, d, src, cookieFile)
+		}
 		code := runYtDlp(d, args)
+		// Best-effort: if the browser attempt produced an authenticated cookie jar, update cache.
+		if tmpCookieFile != "" && fileExists(tmpCookieFile) && strings.TrimSpace(cookieFile) != "" {
+			if err := filterYouTubeCookieFile(tmpCookieFile); err != nil {
+				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+			} else if ok, err := cookieFileLooksLikeLoggedIn(tmpCookieFile); err == nil && ok {
+				if err := copyFileAtomic(tmpCookieFile, cookieFile); err != nil {
+					log.Printf("更新 cookies 缓存失败（将继续）：%v", err)
+				}
+			}
+		}
+		tmpCleanup()
+		if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
+			// Keep the cache minimal even if yt-dlp added extra domains.
+			if err := filterYouTubeCookieFile(cookieFile); err != nil {
+				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+			}
+		}
 		if code == exitOK {
 			if i > 0 && strings.TrimSpace(os.Getenv("MINGEST_BROWSER")) == "" {
 				log.Printf("提示: 已自动切换并使用 %s 的登录态。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
@@ -493,13 +577,18 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 		// When chrome fails, try CDP (Chrome gives us decrypted cookies) before falling back to Firefox.
 		if src.Kind == authKindBrowser && src.Value == "chrome" && shouldTryNextAuth(code) {
 			log.Print("Chrome cookies 失败，尝试使用 Chrome 内部登录态（CDP）...")
-			cdpCode := tryDownloadWithChromeCDP(targetURL, d)
+			cdpCode := tryDownloadWithChromeCDP(targetURL, d, cookieFile)
 			if cdpCode == exitOK {
+				if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
+					if err := filterYouTubeCookieFile(cookieFile); err != nil {
+						log.Printf("过滤 cookies 失败（将继续）：%v", err)
+					}
+				}
 				return exitOK
 			}
-			// If CDP profile is not logged in yet, guide the user to run `mingest auth`.
+			// If CDP cannot provide a working session, guide the user to prepare the managed profile.
 			if cdpCode == exitAuthRequired {
-				log.Print("提示: 工具专用 Chrome profile 尚未登录。请先执行一次: mingest auth")
+				log.Print("提示: CDP 登录态未能通过当前视频的鉴权（可能未登录/未完成年龄确认/账号受限）。请先执行: mingest auth youtube")
 				// Keep classification as AUTH_REQUIRED so callers can decide what to do.
 				code = exitAuthRequired
 			} else if cdpCode == exitCookieProblem {
@@ -519,7 +608,7 @@ func runWithAuthFallback(targetURL string, d deps, sources []authSource) int {
 	if shouldTryNextAuth(lastCode) {
 		log.Print("未能获取有效登录态。请先在浏览器登录目标网站，然后重试。")
 		log.Print("若你实际登录在 Firefox，可尝试: MINGEST_BROWSER=firefox mingest get <url>")
-		log.Print("或先执行一次: mingest auth")
+		log.Print("或先执行一次: mingest auth youtube")
 		return exitAuthRequired
 	}
 	return lastCode
@@ -549,6 +638,28 @@ func buildYtDlpArgs(targetURL string, d deps, src authSource) []string {
 		args = append(args, "--cookies-from-browser", browserArg)
 	default:
 		// no auth args
+	}
+
+	args = append(args, targetURL)
+	return args
+}
+
+func buildYtDlpArgsWithCookieCache(targetURL string, d deps, src authSource, cookieFile string) []string {
+	args := buildYtDlpBaseArgs(d)
+
+	switch src.Kind {
+	case authKindBrowser:
+		browserArg := src.Value
+		if p := strings.TrimSpace(os.Getenv("MINGEST_BROWSER_PROFILE")); p != "" {
+			browserArg = browserArg + ":" + p
+		}
+		args = append(args, "--cookies-from-browser", browserArg)
+	default:
+		// no auth args
+	}
+
+	if strings.TrimSpace(cookieFile) != "" {
+		args = append(args, "--cookies", cookieFile)
 	}
 
 	args = append(args, targetURL)
@@ -711,11 +822,17 @@ func classifyFailure(output string) (int, string) {
 	lower := strings.ToLower(output)
 
 	if strings.Contains(lower, "could not copy") && strings.Contains(lower, "cookie database") {
-		return exitCookieProblem, "浏览器 cookies 数据库无法读取。请先关闭浏览器后重试，或改用 Firefox，或执行 `mingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 数据库无法读取（常见原因: 浏览器仍在占用 cookies 数据库）。请先彻底退出浏览器（含后台进程）后重试；或改用 Firefox；或执行 `mingest auth youtube`（使用 CDP 从浏览器进程内导出 cookies，避免读取数据库）。"
 	}
 
 	if strings.Contains(lower, "failed to decrypt with dpapi") {
-		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `mingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败。请改用 Firefox，或执行 `mingest auth youtube`。"
+	}
+
+	// Chrome's App-Bound Cookie Encryption on Windows intentionally makes third-party decryption harder.
+	// When enabled, tools that read/decrypt the cookie DB may fail even with admin rights.
+	if strings.Contains(lower, "app-bound") && strings.Contains(lower, "cookie") && strings.Contains(lower, "encrypt") {
+		return exitCookieProblem, "检测到 Chrome App-Bound Cookie Encryption 相关错误。此模式下第三方工具可能无法直接解密 Chrome cookies。建议改用 `mingest auth youtube`（CDP 方式）或改用 Firefox/Edge 的登录态。"
 	}
 
 	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "cookies") {
@@ -723,12 +840,17 @@ func classifyFailure(output string) (int, string) {
 	}
 
 	if strings.Contains(lower, "cannot decrypt v11 cookies: no key found") {
-		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `mingest auth`。"
+		return exitCookieProblem, "浏览器 cookies 解密失败（keyring 不可用）。如果你是 SSH 会话，请在本机桌面终端运行，或改用 Firefox，或执行 `mingest auth youtube`。"
 	}
 
 	if strings.Contains(lower, "sign in to confirm you're not a bot") ||
 		strings.Contains(lower, "sign in to confirm you’re not a bot") {
-		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `mingest auth`。"
+		return exitAuthRequired, "需要登录 YouTube。请先在浏览器登录后重试，或执行 `mingest auth youtube`。"
+	}
+
+	if strings.Contains(lower, "sign in to confirm your age") ||
+		(strings.Contains(lower, "this video may be inappropriate for some users") && strings.Contains(lower, "sign in")) {
+		return exitAuthRequired, "需要登录 YouTube 并完成年龄确认（Age-restricted）。请在浏览器中登录并打开该视频完成确认后重试；或执行 `mingest auth youtube` 使用工具专用登录态。"
 	}
 
 	if strings.Contains(lower, "cookies file") && strings.Contains(lower, "netscape") {

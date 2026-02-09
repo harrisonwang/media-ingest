@@ -15,7 +15,7 @@ mingest get "https://www.youtube.com/watch?v=duZDsG3tvoA"
 
 - 自动检测并调用：`yt-dlp`、`ffmpeg`/`ffprobe`、`deno|node`
 - 默认下载并合并为 `mp4`，附带元数据并嵌入封面
-- 自动从浏览器读取 cookies（默认优先 `chrome`）
+- 自动维护 **cookies 缓存**（优先使用；必要时从浏览器读取 cookies 刷新登录态）
 - Windows 11 下 Chrome cookies 读取/解密失败时：自动尝试 **CDP**（让 Chrome 自己把已解密 cookies 交给工具）
 
 ## 安装
@@ -33,12 +33,18 @@ mingest get "https://www.youtube.com/watch?v=duZDsG3tvoA"
 mingest get "<url>"
 ```
 
+2. 若遇到需要登录/年龄确认等限制内容，先准备 YouTube 登录态（可选但推荐）：
+
+```bash
+mingest auth youtube
+```
+
 ## 登录态与 cookies（自动模式）
 
 默认行为：
 
-- 若只检测到 1 个浏览器数据目录：直接使用它
-- 若检测到多个：默认顺序 `chrome -> firefox/chromium/edge`（失败会自动切换）
+- 优先使用 cookies 缓存文件（位于用户配置目录下的 `mingest/youtube-cookies.txt`；Windows 使用 LocalAppData）
+- 若缓存失效/缺失：再按顺序从浏览器读取并刷新（默认顺序 `chrome -> firefox/chromium/edge`，失败会自动切换）
 
 Windows 11 常见情况：
 
