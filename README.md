@@ -1,5 +1,7 @@
 # media-ingest (mingest)
 
+![og-image](og-image.png)
+
 一个 Media Ingestion 命令行工具：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。对需要登录/会员/验证的内容，提供一键 `auth` 交互登录 + cookies 缓存能力，降低使用门槛。
 
 ```bash
