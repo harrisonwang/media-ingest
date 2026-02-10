@@ -1,8 +1,11 @@
-# media-ingest (mingest)
+# Mingest (media-ingest)
 
 ![og-image](og-image.png)
 
-一个 Media Ingestion 命令行工具：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。对需要登录/会员/验证的内容，提供一键 `auth` 交互登录 + cookies 缓存能力，降低使用门槛。
+**Mingest 是一个本地运行的视频归档工具**：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。遇到需要登录/会员/额外验证（例如年龄确认）的内容，可用一键 `auth` 交互登录 + cookies 缓存把门槛降到最低。
+
+> 合规提示：Mingest 仅用于下载/归档你拥有版权或已获授权、或在法律与平台规则允许范围内可保存的内容。它不提供任何内容，不提供在线解析/代下服务，也不支持绕过 DRM 等技术保护措施。更多见：
+> `.docs/disclaimer.md` / `.docs/acceptable-use.md`。
 
 ```bash
 mingest get "https://www.youtube.com/watch?v=******"
@@ -21,6 +24,22 @@ mingest get "https://www.bilibili.com/bangumi/play/ep******"
 - 默认下载并合并为 `mp4`，附带元数据并嵌入封面
 - 自动维护 **cookies 缓存**（优先使用；必要时从浏览器读取 cookies 刷新登录状态）
 - Windows 下 Chrome cookies 读取失败时：自动尝试 **CDP**（让 Chrome 在进程内导出明文 cookies，避免读取/解密数据库）
+
+## 快速开始
+
+1. 下载 Release 的可执行文件（见 GitHub Releases）
+2. 下载视频：
+
+```bash
+mingest get "<url>"
+```
+
+3. 需要登录时（例如大会员、年龄确认、风险提示），先执行一次交互登录：
+
+```bash
+mingest auth youtube
+mingest auth bilibili
+```
 
 ## 安装
 
@@ -72,7 +91,15 @@ Windows 常见情况：
 - `--cookies-from-browser chrome` 可能因为数据库锁定 / DPAPI / App-Bound Encryption 失败
 - 工具会在 Chrome 失败后自动走 CDP（无需 DPAPI 解密）
 
-可用环境变量覆盖：
+## 隐私与安全
+
+- 全程本地运行：不提供在线解析/代下服务，视频文件与账户登录信息均不会经过我们的服务器
+- cookies 仅保存在你的本机，你可以随时删除（见上面的缓存路径）
+- 为减少隐私暴露，工具会把 cookies 缓存过滤为与目标站点相关的域名
+
+更多见：`.docs/privacy.md`。
+
+## 可用环境变量覆盖
 
 - `MINGEST_BROWSER=chrome|firefox|chromium|edge`
 - `MINGEST_BROWSER_PROFILE=Default|Profile 1|...`
@@ -152,4 +179,3 @@ go build -tags embedtools -o dist/mingest ./cmd/mingest
 Copyright (C) 2026 Harrison Wang <https://mingest.com>
 
 `*_bundled` 版本内置的 yt-dlp、ffmpeg/ffprobe、deno 为独立第三方组件，其版权与许可见 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES)。
-

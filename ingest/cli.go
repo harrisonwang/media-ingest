@@ -119,8 +119,8 @@ func usage() {
 	fmt.Println()
 	fmt.Println("行为:")
 	fmt.Println("  - 自动检测并调用 yt-dlp / ffmpeg / ffprobe / deno|node")
-	fmt.Println("  - 自动维护 cookies 缓存（优先使用；必要时从浏览器读取 cookies 刷新登录态）")
-	fmt.Println("  - 若 Windows 下 Chrome cookies 读取/解密失败，可用 `mingest auth <platform>`（CDP）准备工具专用登录态")
+	fmt.Println("  - 自动维护 cookies 缓存（优先使用；必要时从浏览器读取 cookies 刷新账户登录信息）")
+	fmt.Println("  - 若 Windows 下 Chrome cookies 读取/解密失败，可用 `mingest auth <platform>`（CDP）准备工具专用账户登录信息")
 	fmt.Println()
 	fmt.Println("可选环境变量:")
 	fmt.Println("  - MINGEST_BROWSER=chrome|firefox|chromium|edge")
@@ -190,7 +190,7 @@ func runGet(targetURL string) int {
 	if strings.TrimSpace(cookieFile) != "" {
 		log.Printf("将使用 cookies 缓存: %s", cookieFile)
 	}
-	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新登录态")
+	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新账户登录信息")
 
 	return runWithAuthFallback(targetURL, found, p, authSources, cookieFile)
 }
@@ -599,14 +599,14 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 		}
 		if code == exitOK {
 			if i > 0 && strings.TrimSpace(os.Getenv("MINGEST_BROWSER")) == "" {
-				log.Printf("提示: 已自动切换并使用 %s 的登录态。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
+				log.Printf("提示: 已自动切换并使用 %s 的账户登录信息。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
 			}
 			return code
 		}
 		// Prefer Chrome, but on Windows Chrome cookie decryption frequently fails.
 		// When chrome fails, try CDP (Chrome gives us decrypted cookies) before falling back to Firefox.
 		if src.Kind == authKindBrowser && src.Value == "chrome" && shouldTryNextAuth(code) {
-			log.Print("Chrome cookies 失败，尝试使用 Chrome 内部登录态（CDP）...")
+			log.Print("Chrome cookies 失败，尝试使用 Chrome 内部账户登录信息（CDP）...")
 			cdpCode := tryDownloadWithChromeCDP(targetURL, d, platform, cookieFile)
 			if cdpCode == exitOK {
 				if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
@@ -622,7 +622,7 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 				if strings.TrimSpace(platform.ID) != "" {
 					cmd = "mingest auth " + platform.ID
 				}
-				log.Printf("提示: CDP 登录态未能通过当前视频的鉴权（可能未登录/未完成验证/账号受限）。请先执行: %s", cmd)
+				log.Printf("提示: CDP 账户登录信息未能通过当前视频的鉴权（可能未登录/未完成验证/账号受限）。请先执行: %s", cmd)
 				// Keep classification as AUTH_REQUIRED so callers can decide what to do.
 				code = exitAuthRequired
 			} else if cdpCode == exitCookieProblem {
@@ -640,7 +640,7 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 	}
 
 	if shouldTryNextAuth(lastCode) {
-		log.Print("未能获取有效登录态。请先在浏览器登录目标网站，然后重试。")
+		log.Print("未能获取有效账户登录信息。请先在浏览器登录目标网站，然后重试。")
 		log.Print("若你实际登录在 Firefox，可尝试: MINGEST_BROWSER=firefox mingest get <url>")
 		if strings.TrimSpace(platform.ID) != "" {
 			log.Printf("或先执行一次: mingest auth %s", platform.ID)
@@ -879,7 +879,7 @@ func classifyFailure(output string, platform videoPlatform) (int, string) {
 	// Chrome's App-Bound Cookie Encryption on Windows intentionally makes third-party decryption harder.
 	// When enabled, tools that read/decrypt the cookie DB may fail even with admin rights.
 	if strings.Contains(lower, "app-bound") && strings.Contains(lower, "cookie") && strings.Contains(lower, "encrypt") {
-		return exitCookieProblem, fmt.Sprintf("检测到 Chrome App-Bound Cookie Encryption 相关错误。此模式下第三方工具可能无法直接解密 Chrome cookies。建议改用 `%s`（CDP 方式）或改用 Firefox/Edge 的登录态。", authCmd)
+		return exitCookieProblem, fmt.Sprintf("检测到 Chrome App-Bound Cookie Encryption 相关错误。此模式下第三方工具可能无法直接解密 Chrome cookies。建议改用 `%s`（CDP 方式）或改用 Firefox/Edge 的账户登录信息。", authCmd)
 	}
 
 	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "cookies") {
@@ -905,7 +905,7 @@ func classifyFailure(output string, platform videoPlatform) (int, string) {
 		if name != "" {
 			target = name
 		}
-		return exitAuthRequired, fmt.Sprintf("需要登录 %s 并完成额外确认。请在浏览器中登录并打开该视频完成确认后重试；或执行 `%s` 使用工具专用登录态。", target, authCmd)
+		return exitAuthRequired, fmt.Sprintf("需要登录 %s 并完成额外确认。请在浏览器中登录并打开该视频完成确认后重试；或执行 `%s` 使用工具专用账户登录信息。", target, authCmd)
 	}
 
 	// Generic "cookies suggested" auth-required detection for other extractors (e.g. bilibili).

@@ -79,7 +79,7 @@ func runAuth(platform videoPlatform) int {
 	}
 	_ = os.Chmod(cookiePath, 0o600)
 
-	log.Print("登录态已准备好。")
+	log.Print("账户登录信息已准备好。")
 	return exitOK
 }
 
