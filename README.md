@@ -5,7 +5,7 @@
 **Mingest 是一个本地运行的视频归档工具**：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。遇到需要登录/会员/额外验证（例如年龄确认）的内容，可用一键 `auth` 交互登录 + cookies 缓存把门槛降到最低。
 
 > 合规提示：Mingest 仅用于下载/归档你拥有版权或已获授权、或在法律与平台规则允许范围内可保存的内容。它不提供任何内容，不提供在线解析/代下服务，也不支持绕过 DRM 等技术保护措施。更多见：
-> `.docs/disclaimer.md` / `.docs/acceptable-use.md`。
+> [docs/LEGAL.md](docs/LEGAL.md)。
 
 ```bash
 mingest get "https://www.youtube.com/watch?v=******"
@@ -97,7 +97,7 @@ Windows 常见情况：
 - cookies 仅保存在你的本机，你可以随时删除（见上面的缓存路径）
 - 为减少隐私暴露，工具会把 cookies 缓存过滤为与目标站点相关的域名
 
-更多见：`.docs/privacy.md`。
+更多见：[docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 可用环境变量覆盖
 
@@ -151,6 +151,8 @@ Windows 常见情况：
 
 - 说明你用的是 `*_slim` 且系统/目录里只有 `ffmpeg` 没有 `ffprobe`
 - 换用 `*_bundled`，或确保 `ffprobe` 与 `ffmpeg` 同目录可用
+
+更多问答见 [docs/FAQ.md](docs/FAQ.md)。
 
 ## 从源码构建
 
