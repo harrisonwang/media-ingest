@@ -5,8 +5,9 @@
 一个 Media Ingestion 命令行工具：输入 URL，自动调用 `yt-dlp` 下载，并默认合并为 `mp4`（嵌入封面与元数据）。对需要登录/会员/验证的内容，提供一键 `auth` 交互登录 + cookies 缓存能力，降低使用门槛。
 
 ```bash
-mingest get "https://www.youtube.com/watch?v=duZDsG3tvoA"
-mingest get "https://www.bilibili.com/bangumi/play/ss143815"
+mingest get "https://www.youtube.com/watch?v=******"
+mingest get "https://www.bilibili.com/bangumi/play/ss******"
+mingest get "https://www.bilibili.com/bangumi/play/ep******"
 ```
 
 说明：
@@ -26,7 +27,7 @@ mingest get "https://www.bilibili.com/bangumi/play/ss143815"
 推荐直接下载 GitHub Release 的产物。
 
 - `*_slim`：不内置工具，需要你自己装 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno|node`
-- `*_bundled`：内置 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno`（开箱即用，体积更大）
+- `*_bundled`：内置 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno`（开箱即用，体积更大；含 `THIRD_PARTY_LICENSES` 满足各组件许可归属）
 
 ## 用法
 
@@ -144,4 +145,11 @@ go build -tags embedtools -o dist/mingest ./cmd/mingest
 - 工具下载目录：`ingest/embedtools/assets/<goos>/`
 - 获取 `ffmpeg` 时会一并获取 `ffprobe`
 - GitHub Actions 工作流见 `.github/workflows/build-and-release.yml`
+
+## 许可证
+
+本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) 开源协议。  
+Copyright (C) 2026 Harrison Wang <https://mingest.com>
+
+`*_bundled` 版本内置的 yt-dlp、ffmpeg/ffprobe、deno 为独立第三方组件，其版权与许可见 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES)。
 

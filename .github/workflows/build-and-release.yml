@@ -113,6 +113,7 @@ jobs:
           mkdir -p package out
           cp "dist/mingest-bundled" "package/mingest"
           cp README.md package/ || true
+          cp THIRD_PARTY_LICENSES package/ || true
           tar -C package -czf "out/${pkg}.tar.gz" .
 
       - name: Package bundled (zip)
@@ -125,6 +126,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item "dist\\mingest-bundled.exe" "package\\mingest.exe"
           Copy-Item "README.md" "package\\README.md"
+          Copy-Item "THIRD_PARTY_LICENSES" "package\\THIRD_PARTY_LICENSES"
           Compress-Archive -Path "package\\*" -DestinationPath "out\\$pkg.zip" -Force
 
       - name: Upload artifact (bundled)
