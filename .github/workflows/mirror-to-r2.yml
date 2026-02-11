@@ -1,0 +1,124 @@
+name: mirror-to-r2
+
+on:
+  # Note: releases created by another workflow using GITHUB_TOKEN may not trigger `release`.
+  # We also listen to the build workflow completion to make mirroring reliable.
+  release:
+    types: [published]
+  workflow_run:
+    workflows: [build-and-release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to mirror, e.g. v0.3.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: auto
+      AWS_EC2_METADATA_DISABLED: "true"
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+
+    steps:
+      - name: Checkout (for tag resolution)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=""
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            # workflow_run: find the pushed tag on the commit.
+            TAG="$(git tag --points-at HEAD | grep -E '^v' | sort -V | tail -n 1 || true)"
+          fi
+
+          if [[ -z "$TAG" ]]; then
+            echo "No tag resolved; skipping mirror job."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Resolved TAG=$TAG"
+
+      - name: Download release assets (bundled + checksums)
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          gh release download "$TAG" -R "${{ github.repository }}" -D out --pattern "media-ingest_*_bundled.*"
+          gh release download "$TAG" -R "${{ github.repository }}" -D out --pattern "SHA256SUMS.txt"
+          ls -la out
+
+      - name: Prepare R2 files (stable names)
+        if: steps.tag.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p mirror
+
+          cp "out/media-ingest_${TAG}_windows_amd64_bundled.zip" "mirror/mingest-windows-x64.zip"
+          cp "out/media-ingest_${TAG}_linux_amd64_bundled.tar.gz" "mirror/mingest-linux-x64.tar.gz"
+          cp "out/media-ingest_${TAG}_darwin_amd64_bundled.tar.gz" "mirror/mingest-macos-x64.tar.gz"
+          cp "out/media-ingest_${TAG}_darwin_arm64_bundled.tar.gz" "mirror/mingest-macos-arm64.tar.gz"
+
+          # Reuse hashes from SHA256SUMS.txt but rewrite filenames to the stable ones.
+          awk -v win="media-ingest_${TAG}_windows_amd64_bundled.zip" \
+              -v linux="media-ingest_${TAG}_linux_amd64_bundled.tar.gz" \
+              -v macx="media-ingest_${TAG}_darwin_amd64_bundled.tar.gz" \
+              -v maca="media-ingest_${TAG}_darwin_arm64_bundled.tar.gz" '
+            $2==win   {print $1"  mingest-windows-x64.zip"}
+            $2==linux {print $1"  mingest-linux-x64.tar.gz"}
+            $2==macx  {print $1"  mingest-macos-x64.tar.gz"}
+            $2==maca  {print $1"  mingest-macos-arm64.tar.gz"}
+          ' "out/SHA256SUMS.txt" > "mirror/sha256sums.txt"
+
+          test "$(wc -l < mirror/sha256sums.txt)" -eq 4
+          ls -la mirror
+
+      - name: Upload to R2 (versioned)
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 cp mirror "s3://${R2_BUCKET}/releases/${TAG}/" \
+            --recursive \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --no-progress
+
+      - name: Upload to R2 (latest)
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 cp mirror "s3://${R2_BUCKET}/releases/latest/" \
+            --recursive \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --cache-control "public, max-age=600" \
+            --no-progress
