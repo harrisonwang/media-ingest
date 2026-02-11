@@ -60,7 +60,7 @@ jobs:
           mkdir -p dist
           out="dist/mingest${{ matrix.exe_ext }}"
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/mingest
+            go build -trimpath -ldflags "-s -w -X media-ingest/ingest.version=${VERSION}" -o "$out" ./cmd/mingest
 
       - name: Package slim (tar.gz)
         if: runner.os != 'Windows'
@@ -104,7 +104,7 @@ jobs:
           mkdir -p dist
           out="dist/mingest-bundled${{ matrix.exe_ext }}"
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -tags embedtools -trimpath -ldflags "-s -w" -o "$out" ./cmd/mingest
+            go build -tags embedtools -trimpath -ldflags "-s -w -X media-ingest/ingest.version=${VERSION}" -o "$out" ./cmd/mingest
 
       - name: Package bundled (tar.gz)
         if: runner.os != 'Windows'

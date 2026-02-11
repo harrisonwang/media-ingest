@@ -43,10 +43,30 @@ mingest auth bilibili
 
 ## 安装
 
-推荐直接下载 GitHub Release 的产物。
+推荐优先使用包管理器安装：
+
+### Homebrew（macOS / Linux）
+
+```bash
+brew tap mingesthq/tap
+brew install mingest
+```
+
+### Winget（Windows）
+
+```powershell
+winget install Mingest.Mingest
+```
+
+若你暂时不使用包管理器，也可以直接下载 GitHub Release 的产物。
 
 - `*_slim`：不内置工具，需要你自己装 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno|node`
 - `*_bundled`：内置 `yt-dlp`、`ffmpeg`/`ffprobe`、`deno`（开箱即用，体积更大；含 `THIRD_PARTY_LICENSES` 满足各组件许可归属）
+
+说明：
+
+- 当前推荐安装渠道：`brew`、`winget`
+- 首版分发默认不含系统签名/公证，系统安全提示属于预期行为
 
 ## 用法
 
@@ -153,6 +173,34 @@ Windows 常见情况：
 - 换用 `*_bundled`，或确保 `ffprobe` 与 `ffmpeg` 同目录可用
 
 更多问答见 [docs/FAQ.md](docs/FAQ.md)。
+
+## 包管理器发布（维护者）
+
+本仓库内置了用于生成 Homebrew / winget 清单的脚本与工作流：
+
+- 脚本：
+  - `scripts/generate-homebrew-formula.sh`
+  - `scripts/generate-winget-manifests.sh`
+- 工作流：
+  - `.github/workflows/publish-homebrew.yml`
+  - `.github/workflows/publish-winget.yml`
+
+默认行为：
+
+- 每次发布 tag（`v*`）后，工作流会基于 `SHA256SUMS.txt` 生成 Formula / manifests 并上传为 artifacts
+- 若配置了对应 secrets，会自动尝试创建 PR
+
+Homebrew 自动 PR 所需 secrets：
+
+- `HOMEBREW_TAP_GH_TOKEN`：可写目标 tap 仓库的 token
+- `HOMEBREW_TAP_REPO`：目标 tap 仓库（可选，默认 `mingesthq/homebrew-tap`）
+
+winget 自动 PR 所需 secrets：
+
+- `WINGET_GH_TOKEN`：可写你自己 winget-pkgs fork 的 token
+- `WINGET_FORK_REPO`：你的 fork 仓库（例如 `yourname/winget-pkgs`）
+
+更多细节见 [docs/PACKAGING.md](docs/PACKAGING.md)。
 
 ## 从源码构建
 

@@ -83,6 +83,11 @@ func Main(args []string) int {
 		return exitOK
 	}
 
+	if len(args) == 2 && isVersionArg(args[1]) {
+		printVersion()
+		return exitOK
+	}
+
 	switch strings.ToLower(strings.TrimSpace(args[1])) {
 	case "get":
 		if len(args) != 3 {
@@ -144,6 +149,21 @@ func isHelpArg(v string) bool {
 	default:
 		return false
 	}
+}
+
+func isVersionArg(v string) bool {
+	switch v {
+	case "-v", "--version", "version":
+		return true
+	default:
+		return false
+	}
+}
+
+var version = "dev"
+
+func printVersion() {
+	fmt.Printf("mingest %s\n", strings.TrimSpace(version))
 }
 
 func runGet(targetURL string) int {
