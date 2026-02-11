@@ -30,7 +30,7 @@ Homebrew Formula：
 
 ```bash
 scripts/generate-homebrew-formula.sh \
-  --tag v0.4.0 \
+  --tag v0.4.2 \
   --repo mingesthq/media-ingest \
   --checksums artifacts/SHA256SUMS.txt \
   --output out/mingest.rb
@@ -40,7 +40,7 @@ winget manifests：
 
 ```bash
 scripts/generate-winget-manifests.sh \
-  --tag v0.4.0 \
+  --tag v0.4.2 \
   --repo mingesthq/media-ingest \
   --checksums artifacts/SHA256SUMS.txt \
   --output-dir out

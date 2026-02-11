@@ -6,7 +6,7 @@ usage() {
 Usage: $0 --tag <tag> --repo <owner/repo> --checksums <SHA256SUMS.txt> [--output <path>]
 
 Example:
-  $0 --tag v0.4.0 --repo mingesthq/media-ingest --checksums artifacts/SHA256SUMS.txt --output Formula/mingest.rb
+  $0 --tag v0.4.2 --repo mingesthq/media-ingest --checksums artifacts/SHA256SUMS.txt --output Formula/mingest.rb
 USAGE
 }
 
