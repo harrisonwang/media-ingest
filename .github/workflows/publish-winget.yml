@@ -92,7 +92,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- "${TARGET_DIR}"; then
+          if [[ -z "$(git status --porcelain -- "${TARGET_DIR}")" ]]; then
             echo "No winget manifest changes to publish"
             exit 0
           fi
