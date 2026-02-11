@@ -50,6 +50,11 @@ scripts/generate-winget-manifests.sh \
 
 如果配置了 secrets，工作流会自动创建 PR；未配置时会上传生成结果作为 artifact。
 
+Homebrew 首次发布的特殊行为：
+
+- 如果 `homebrew-tap` 还是空仓库（没有任何提交/默认分支），工作流会先把 `Formula/mingest.rb` 直接提交到 `main` 作为初始化
+- 从第二次发布开始，自动改为分支 + PR 流程
+
 Homebrew secrets：
 
 - `HOMEBREW_TAP_GH_TOKEN`
@@ -59,4 +64,3 @@ winget secrets：
 
 - `WINGET_GH_TOKEN`
 - `WINGET_FORK_REPO`（例如 `yourname/winget-pkgs`）
-

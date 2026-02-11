@@ -189,6 +189,7 @@ Windows 常见情况：
 
 - 每次发布 tag（`v*`）后，工作流会基于 `SHA256SUMS.txt` 生成 Formula / manifests 并上传为 artifacts
 - 若配置了对应 secrets，会自动尝试创建 PR
+- Homebrew 首次发布若 tap 为空仓库，会先自动初始化 `main` 分支（直推首个 `Formula/mingest.rb`）；后续版本走 PR 流程
 
 Homebrew 自动 PR 所需 secrets：
 
