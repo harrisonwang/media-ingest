@@ -67,21 +67,23 @@ jobs:
         shell: bash
         run: |
           pkg="media-ingest_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_slim"
-          mkdir -p package out
-          cp "dist/mingest" "package/mingest"
-          cp README.md package/ || true
-          tar -C package -czf "out/${pkg}.tar.gz" .
+          rm -rf package
+          mkdir -p package/mingest out
+          cp "dist/mingest" "package/mingest/mingest"
+          cp README.md "package/mingest/" || true
+          tar -C package -czf "out/${pkg}.tar.gz" mingest
 
       - name: Package slim (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $pkg = "media-ingest_${env:VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_slim"
-          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Remove-Item -Recurse -Force package -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path package\mingest | Out-Null
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item "dist\\mingest.exe" "package\\mingest.exe"
-          Copy-Item "README.md" "package\\README.md"
-          Compress-Archive -Path "package\\*" -DestinationPath "out\\$pkg.zip" -Force
+          Copy-Item "dist\mingest.exe" "package\mingest\mingest.exe"
+          Copy-Item "README.md" "package\mingest\README.md"
+          Compress-Archive -Path "package\mingest" -DestinationPath "out\$pkg.zip" -Force
 
       - name: Upload artifact (slim)
         uses: actions/upload-artifact@v4
@@ -110,11 +112,11 @@ jobs:
         run: |
           pkg="media-ingest_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_bundled"
           rm -rf package
-          mkdir -p package out
-          cp "dist/mingest-bundled" "package/mingest"
-          cp README.md package/ || true
-          cp THIRD_PARTY_LICENSES package/ || true
-          tar -C package -czf "out/${pkg}.tar.gz" .
+          mkdir -p package/mingest out
+          cp "dist/mingest-bundled" "package/mingest/mingest"
+          cp README.md "package/mingest/" || true
+          cp THIRD_PARTY_LICENSES "package/mingest/" || true
+          tar -C package -czf "out/${pkg}.tar.gz" mingest
 
       - name: Package bundled (zip)
         if: runner.os == 'Windows'
@@ -122,12 +124,12 @@ jobs:
         run: |
           $pkg = "media-ingest_${env:VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}_bundled"
           Remove-Item -Recurse -Force package -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path package | Out-Null
+          New-Item -ItemType Directory -Force -Path package\mingest | Out-Null
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item "dist\\mingest-bundled.exe" "package\\mingest.exe"
-          Copy-Item "README.md" "package\\README.md"
-          Copy-Item "THIRD_PARTY_LICENSES" "package\\THIRD_PARTY_LICENSES"
-          Compress-Archive -Path "package\\*" -DestinationPath "out\\$pkg.zip" -Force
+          Copy-Item "dist\mingest-bundled.exe" "package\mingest\mingest.exe"
+          Copy-Item "README.md" "package\mingest\README.md"
+          Copy-Item "THIRD_PARTY_LICENSES" "package\mingest\THIRD_PARTY_LICENSES"
+          Compress-Archive -Path "package\mingest" -DestinationPath "out\$pkg.zip" -Force
 
       - name: Upload artifact (bundled)
         uses: actions/upload-artifact@v4
