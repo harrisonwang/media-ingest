@@ -37,10 +37,10 @@
 - `--subtitle-style <clean|shorts>`：字幕样式模板。
 - `--json`：输出结构化处理结果。
 
-### 5) `mingest export <asset_ref> --to <premiere|resolve> [--with <srt,edl,csv>] [--out-dir <dir>] [--zip] [--json]`
+### 5) `mingest export <asset_ref> --to <premiere|resolve|capcut> [--with <srt,edl,csv,fcpxml>] [--out-dir <dir>] [--zip] [--json]`
 - `<asset_ref>`：`asset_id` 或本地文件路径。
-- `--to <premiere|resolve>`：目标剪辑软件。
-- `--with <srt,edl,csv>`：导出内容类型（逗号分隔）。
+- `--to <premiere|resolve|capcut>`：目标剪辑软件（`jianying` 也可作为 `capcut` 别名）。
+- `--with <srt,edl,csv,fcpxml>`：导出内容类型（逗号分隔）。
 - `--out-dir <dir>`：导出目录。
 - `--zip`：导出结果压缩为 zip。
 - `--json`：输出结构化导出清单。

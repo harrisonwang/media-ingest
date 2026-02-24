@@ -22,8 +22,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -54,9 +56,7 @@ type exportJSONResult struct {
 }
 
 func parseExportOptions(args []string) (exportOptions, error) {
-	opts := exportOptions{
-		With: []string{"srt", "edl", "csv"},
-	}
+	opts := exportOptions{}
 
 	withProvided := false
 
@@ -112,20 +112,27 @@ func parseExportOptions(args []string) (exportOptions, error) {
 	}
 
 	if strings.TrimSpace(opts.AssetRef) == "" {
-		return exportOptions{}, fmt.Errorf("缺少 asset_ref。用法: mingest export <asset_ref> --to <premiere|resolve>")
+		return exportOptions{}, fmt.Errorf("缺少 asset_ref。用法: mingest export <asset_ref> --to <premiere|resolve|capcut>")
 	}
-	switch opts.To {
-	case "premiere", "resolve":
-	default:
-		return exportOptions{}, fmt.Errorf("`--to` 仅支持 premiere|resolve")
+	normalizedTarget, err := normalizeExportTarget(opts.To)
+	if err != nil {
+		return exportOptions{}, err
+	}
+	opts.To = normalizedTarget
+
+	if !withProvided {
+		opts.With = defaultExportFormatsForTarget(opts.To)
 	}
 	if strings.TrimSpace(opts.OutDir) != "" {
 		if abs, err := filepath.Abs(opts.OutDir); err == nil {
 			opts.OutDir = abs
 		}
 	}
-	if withProvided && len(opts.With) == 0 {
-		return exportOptions{}, fmt.Errorf("`--with` 至少包含一个格式: srt|edl|csv")
+	if len(opts.With) == 0 {
+		return exportOptions{}, fmt.Errorf("`--with` 至少包含一个格式")
+	}
+	if err := validateExportFormatsForTarget(opts.To, opts.With); err != nil {
+		return exportOptions{}, err
 	}
 
 	return opts, nil
@@ -141,9 +148,9 @@ func parseExportFormats(raw string) ([]string, error) {
 			continue
 		}
 		switch v {
-		case "srt", "edl", "csv":
+		case "srt", "edl", "csv", "fcpxml":
 		default:
-			return nil, fmt.Errorf("`--with` 仅支持 srt|edl|csv（收到: %s）", v)
+			return nil, fmt.Errorf("`--with` 仅支持 srt|edl|csv|fcpxml（收到: %s）", v)
 		}
 		if _, ok := seen[v]; ok {
 			continue
@@ -152,6 +159,47 @@ func parseExportFormats(raw string) ([]string, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+func normalizeExportTarget(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "premiere", "resolve", "capcut":
+		return strings.ToLower(strings.TrimSpace(raw)), nil
+	case "jianying", "剪映":
+		return "capcut", nil
+	default:
+		return "", fmt.Errorf("`--to` 仅支持 premiere|resolve|capcut（jianying 也可作为 capcut 别名）")
+	}
+}
+
+func defaultExportFormatsForTarget(target string) []string {
+	switch target {
+	case "capcut":
+		return []string{"srt", "csv"}
+	default:
+		return []string{"fcpxml", "srt"}
+	}
+}
+
+func validateExportFormatsForTarget(target string, formats []string) error {
+	allowed := map[string]struct{}{}
+	switch target {
+	case "capcut":
+		allowed["srt"] = struct{}{}
+		allowed["csv"] = struct{}{}
+	default:
+		allowed["srt"] = struct{}{}
+		allowed["csv"] = struct{}{}
+		allowed["edl"] = struct{}{}
+		allowed["fcpxml"] = struct{}{}
+	}
+
+	for _, f := range formats {
+		if _, ok := allowed[f]; !ok {
+			return fmt.Errorf("目标 `%s` 不支持 `%s` 导出格式", target, f)
+		}
+	}
+	return nil
 }
 
 func runExport(opts exportOptions) int {
@@ -190,12 +238,9 @@ func runExport(opts exportOptions) int {
 		switch f {
 		case "srt":
 			target := filepath.Join(outDir, asset.AssetID+".srt")
-			src := strings.TrimSpace(plan.Outputs.SubtitlePath)
-			if src == "" || !fileExists(src) {
-				src = strings.TrimSpace(plan.Outputs.SubtitleTemplate)
-			}
-			if src == "" || !fileExists(src) {
-				return exportExitWithErr(opts.JSON, exitDownloadFailed, "prep 结果中没有可导出的字幕文件（subtitle_path/subtitle_template 均不存在）")
+			src, err := pickSubtitleSource(plan)
+			if err != nil {
+				return exportExitWithErr(opts.JSON, exitDownloadFailed, err.Error())
 			}
 			if err := copyFileAtomic(src, target); err != nil {
 				return exportExitWithErr(opts.JSON, exitDownloadFailed, fmt.Sprintf("导出 srt 失败: %v", err))
@@ -217,6 +262,19 @@ func runExport(opts exportOptions) int {
 				return exportExitWithErr(opts.JSON, exitDownloadFailed, fmt.Sprintf("导出 edl 失败: %v", err))
 			}
 			exported["edl"] = target
+		case "fcpxml":
+			target := filepath.Join(outDir, asset.AssetID+".fcpxml")
+			if err := writeExportFCPXML(target, asset, plan, opts.To); err != nil {
+				return exportExitWithErr(opts.JSON, exitDownloadFailed, fmt.Sprintf("导出 fcpxml 失败: %v", err))
+			}
+			exported["fcpxml"] = target
+		}
+	}
+
+	if opts.To == "capcut" {
+		guidePath := filepath.Join(outDir, "CAPCUT_IMPORT.md")
+		if err := writeCapCutGuide(guidePath, asset.AssetID, exported["srt"], exported["csv"]); err == nil {
+			exported["guide"] = guidePath
 		}
 	}
 
@@ -338,6 +396,207 @@ func readPrepPlan(path string) (prepPlan, error) {
 		return prepPlan{}, err
 	}
 	return plan, nil
+}
+
+func pickSubtitleSource(plan prepPlan) (string, error) {
+	src := strings.TrimSpace(plan.Outputs.SubtitlePath)
+	if src != "" && fileExists(src) {
+		return src, nil
+	}
+
+	src = strings.TrimSpace(plan.Outputs.SubtitleTemplate)
+	if src != "" && fileExists(src) {
+		return src, nil
+	}
+	return "", fmt.Errorf("prep 结果中没有可导出的字幕文件（subtitle_path/subtitle_template 均不存在）")
+}
+
+func writeExportFCPXML(path string, asset prepResolvedAsset, plan prepPlan, target string) error {
+	width := plan.Probe.Width
+	height := plan.Probe.Height
+	if width <= 0 {
+		width = 1920
+	}
+	if height <= 0 {
+		height = 1080
+	}
+
+	fps := plan.Probe.FPS
+	frameDuration := fcpxmlFrameDuration(fps)
+	assetDuration := plan.Probe.DurationSec
+	if assetDuration <= 0 {
+		assetDuration = sumClipDuration(plan.Clips)
+	}
+	if assetDuration <= 0 {
+		assetDuration = 1
+	}
+
+	clips := plan.Clips
+	if len(clips) == 0 {
+		clips = []prepClip{
+			{
+				Index:       1,
+				StartSec:    0,
+				EndSec:      assetDuration,
+				DurationSec: assetDuration,
+				Label:       "clip-01",
+				Reason:      "full timeline",
+			},
+		}
+	}
+
+	projectLabel := fmt.Sprintf("mingest_%s_%s", target, asset.AssetID)
+	assetName := filepath.Base(asset.OutputPath)
+	srcURL := fileURLFromPath(asset.OutputPath)
+	seqDuration := sumClipDuration(clips)
+	if seqDuration <= 0 {
+		seqDuration = assetDuration
+	}
+
+	var b bytes.Buffer
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE fcpxml>` + "\n")
+	b.WriteString(`<fcpxml version="1.10">` + "\n")
+	b.WriteString(`  <resources>` + "\n")
+	b.WriteString(fmt.Sprintf(`    <format id="r_format" name="%s" frameDuration="%s" width="%d" height="%d" colorSpace="1-1-1 (Rec. 709)"/>`+"\n",
+		xmlEscapeAttr(fmt.Sprintf("FFVideoFormat%dx%d", width, height)),
+		xmlEscapeAttr(frameDuration),
+		width,
+		height,
+	))
+	b.WriteString(fmt.Sprintf(`    <asset id="r_asset" name="%s" start="0s" duration="%s" hasVideo="1" hasAudio="1" format="r_format" src="%s"/>`+"\n",
+		xmlEscapeAttr(assetName),
+		xmlEscapeAttr(fcpxmlSeconds(assetDuration)),
+		xmlEscapeAttr(srcURL),
+	))
+	b.WriteString(`  </resources>` + "\n")
+	b.WriteString(`  <library>` + "\n")
+	b.WriteString(fmt.Sprintf(`    <event name="%s">`+"\n", xmlEscapeAttr("mingest")))
+	b.WriteString(fmt.Sprintf(`      <project name="%s">`+"\n", xmlEscapeAttr(projectLabel)))
+	b.WriteString(fmt.Sprintf(`        <sequence format="r_format" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k" duration="%s">`+"\n", xmlEscapeAttr(fcpxmlSeconds(seqDuration))))
+	b.WriteString(`          <spine>` + "\n")
+
+	offset := 0.0
+	for i, clip := range clips {
+		start := clip.StartSec
+		duration := clip.DurationSec
+		if duration <= 0 && clip.EndSec > clip.StartSec {
+			duration = clip.EndSec - clip.StartSec
+		}
+		if duration <= 0 {
+			continue
+		}
+		label := strings.TrimSpace(clip.Label)
+		if label == "" {
+			label = fmt.Sprintf("clip-%02d", i+1)
+		}
+		b.WriteString(fmt.Sprintf(`            <asset-clip name="%s" ref="r_asset" offset="%s" start="%s" duration="%s"/>`+"\n",
+			xmlEscapeAttr(label),
+			xmlEscapeAttr(fcpxmlSeconds(offset)),
+			xmlEscapeAttr(fcpxmlSeconds(start)),
+			xmlEscapeAttr(fcpxmlSeconds(duration)),
+		))
+		offset += duration
+	}
+
+	b.WriteString(`          </spine>` + "\n")
+	b.WriteString(`        </sequence>` + "\n")
+	b.WriteString(`      </project>` + "\n")
+	b.WriteString(`    </event>` + "\n")
+	b.WriteString(`  </library>` + "\n")
+	b.WriteString(`</fcpxml>` + "\n")
+	return os.WriteFile(path, b.Bytes(), 0o644)
+}
+
+func writeCapCutGuide(path, assetID, srtPath, csvPath string) error {
+	var b bytes.Buffer
+	b.WriteString("# CapCut / 剪映 导入说明\n\n")
+	b.WriteString("1. 打开剪映桌面版，导入视频素材。\n")
+	if strings.TrimSpace(srtPath) != "" {
+		b.WriteString(fmt.Sprintf("2. 在字幕面板选择“导入字幕文件”，选择 `%s`。\n", srtPath))
+	} else {
+		b.WriteString("2. 本次未导出 srt，建议先重新执行 export 并包含 --with srt。\n")
+	}
+	if strings.TrimSpace(csvPath) != "" {
+		b.WriteString(fmt.Sprintf("3. `%s` 是建议片段时间点，可用于手动切片参考。\n", csvPath))
+	}
+	b.WriteString(fmt.Sprintf("4. 建议先校对关键片段，再全片导出（asset_id: %s）。\n", assetID))
+	return os.WriteFile(path, b.Bytes(), 0o644)
+}
+
+func fcpxmlFrameDuration(fps float64) string {
+	if fps <= 0 {
+		return "1/30s"
+	}
+	switch {
+	case approxEqual(fps, 23.976):
+		return "1001/24000s"
+	case approxEqual(fps, 29.97):
+		return "1001/30000s"
+	case approxEqual(fps, 59.94):
+		return "1001/60000s"
+	default:
+		rounded := int(fps + 0.5)
+		if rounded <= 0 {
+			rounded = 30
+		}
+		return fmt.Sprintf("1/%ds", rounded)
+	}
+}
+
+func approxEqual(a, b float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff < 0.02
+}
+
+func fcpxmlSeconds(sec float64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	return fmt.Sprintf("%.3fs", sec)
+}
+
+func sumClipDuration(clips []prepClip) float64 {
+	total := 0.0
+	for _, c := range clips {
+		d := c.DurationSec
+		if d <= 0 && c.EndSec > c.StartSec {
+			d = c.EndSec - c.StartSec
+		}
+		if d > 0 {
+			total += d
+		}
+	}
+	return total
+}
+
+func fileURLFromPath(p string) string {
+	abs := strings.TrimSpace(p)
+	if abs == "" {
+		return ""
+	}
+	if v, err := filepath.Abs(abs); err == nil {
+		abs = v
+	}
+	path := filepath.ToSlash(abs)
+	if runtime.GOOS == "windows" && len(path) >= 2 && path[1] == ':' {
+		path = "/" + path
+	}
+	return (&url.URL{Scheme: "file", Path: path}).String()
+}
+
+func xmlEscapeAttr(v string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"'", "&apos;",
+		"<", "&lt;",
+		">", "&gt;",
+	)
+	return replacer.Replace(v)
 }
 
 func writeExportEDL(path, assetID string, clips []prepClip, fps float64) error {
