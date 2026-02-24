@@ -139,8 +139,16 @@ fetch_ytdlp() {
   if [[ "${GOOS}" == "windows" ]]; then
     target="${out_dir}/yt-dlp.exe"
     download "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "${target}"
+  elif [[ "${GOOS}" == "darwin" ]]; then
+    # Use native macOS universal binary so bundled builds do not depend on system python/CLT.
+    local asset=""
+    case "${GOARCH}" in
+      arm64|amd64) asset="yt-dlp_macos" ;;
+      *) die "no yt-dlp asset mapping for ${GOOS}/${GOARCH}" ;;
+    esac
+    download "https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}" "${target}"
   else
-    # Unix executable (python zipapp / script); works on linux+darwin.
+    # Linux uses the generic unix launcher.
     download "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" "${target}"
   fi
   chmod_x "${target}"
