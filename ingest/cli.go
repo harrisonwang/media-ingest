@@ -55,6 +55,7 @@ const (
 const (
 	defaultYtDlpOutputTemplate = "%(title)s.%(ext)s"
 	ytDlpPathMarker            = "__MINGEST_PATH__"
+	ytDlpProgressMarker        = "__MINGEST_PROGRESS__"
 )
 
 type tool struct {
@@ -114,6 +115,19 @@ type ytDlpConfig struct {
 	Quiet            bool
 }
 
+type streamOptions struct {
+	HidePathMarker bool
+	Progress       *progressRenderer
+}
+
+type progressRenderer struct {
+	mu          sync.Mutex
+	out         io.Writer
+	tty         bool
+	lastPercent int
+	hadRender   bool
+}
+
 type assetRecord struct {
 	AssetID    string `json:"asset_id"`
 	URL        string `json:"url"`
@@ -167,6 +181,14 @@ func Main(args []string) int {
 			return exitUsage
 		}
 		return runPrep(opts)
+	case "export":
+		opts, err := parseExportOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
+			usage()
+			return exitUsage
+		}
+		return runExport(opts)
 	case "ls":
 		opts, err := parseLsOptions(args[2:])
 		if err != nil {
@@ -197,6 +219,7 @@ func usage() {
 	fmt.Println("用法:")
 	fmt.Println("  mingest get <url> [--out-dir <dir>] [--name-template <tpl>] [--asset-id-only] [--json]")
 	fmt.Println("  mingest prep <asset_ref> --goal <subtitle|highlights|shorts> [--lang <auto|zh|en>] [--max-clips <n>] [--clip-seconds <sec>] [--subtitle-style <clean|shorts>] [--json]")
+	fmt.Println("  mingest export <asset_ref> --to <premiere|resolve> [--with <srt,edl,csv>] [--out-dir <dir>] [--zip] [--json]")
 	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
@@ -212,6 +235,13 @@ func usage() {
 	fmt.Println("  --max-clips <n>           建议片段数（默认 subtitle/highlights=5, shorts=3）")
 	fmt.Println("  --clip-seconds <n>        单片段建议时长秒数（默认 subtitle/highlights=45, shorts=30）")
 	fmt.Println("  --subtitle-style <v>      字幕模板风格：clean|shorts（默认 clean）")
+	fmt.Println("  --json                    输出 JSON 结果")
+	fmt.Println()
+	fmt.Println("export 参数:")
+	fmt.Println("  --to <v>                  目标软件：premiere|resolve")
+	fmt.Println("  --with <srt,edl,csv>      导出内容（默认 srt,edl,csv）")
+	fmt.Println("  --out-dir <dir>           导出目录（默认素材目录下 .mingest/export）")
+	fmt.Println("  --zip                     额外打包 zip")
 	fmt.Println("  --json                    输出 JSON 结果")
 	fmt.Println()
 	fmt.Println("ls 参数:")
@@ -234,6 +264,8 @@ func usage() {
 	fmt.Println("  - MINGEST_BROWSER_PROFILE=Default|Profile 1|...")
 	fmt.Println("  - MINGEST_JS_RUNTIME=node|deno")
 	fmt.Println("  - MINGEST_CHROME_PATH=C:\\\\Path\\\\To\\\\chrome.exe")
+	fmt.Println("  - MINGEST_WHISPER_PATH=/path/to/whisper")
+	fmt.Println("  - MINGEST_WHISPER_MODEL=tiny|base|small|medium|large")
 	fmt.Println()
 	fmt.Println("退出码:")
 	fmt.Println("  - 20: 需要登录（AUTH_REQUIRED）")
@@ -1401,6 +1433,13 @@ func buildYtDlpBaseArgs(d deps, cfg ytDlpConfig) []string {
 		"-f", "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
 		"--merge-output-format", "mp4",
 	)
+	if !cfg.Quiet {
+		args = append(args,
+			"--progress",
+			"--newline",
+			"--progress-template", "download:"+ytDlpProgressMarker+"%(progress._percent_str)s|%(progress._speed_str)s|%(progress.eta)s",
+		)
+	}
 	if cfg.CaptureMovedPath {
 		args = append(args, "--print", "after_move:"+ytDlpPathMarker+"%(filepath)s")
 	}
@@ -1456,16 +1495,26 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 
 	stdoutTarget := io.Writer(os.Stdout)
 	stderrTarget := io.Writer(os.Stderr)
+	progress := newProgressRenderer(stderrTarget)
 	if cfg.Quiet {
 		stdoutTarget = io.Discard
 		stderrTarget = io.Discard
+		progress = nil
 	}
 
-	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, cfg.CaptureMovedPath, &wg)
-	go streamAndCapture(stderrR, stderrTarget, &stderrBuf, false, &wg)
+	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, streamOptions{
+		HidePathMarker: cfg.CaptureMovedPath,
+		Progress:       progress,
+	}, &wg)
+	go streamAndCapture(stderrR, stderrTarget, &stderrBuf, streamOptions{
+		Progress: progress,
+	}, &wg)
 
 	state, waitErr := proc.Wait()
 	wg.Wait()
+	if progress != nil {
+		progress.finish()
+	}
 	combined := stdoutBuf.String() + "\n" + stderrBuf.String()
 
 	if waitErr != nil {
@@ -1512,7 +1561,7 @@ func extractMovedPaths(stdout string, enabled bool) []string {
 	return out
 }
 
-func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, hidePathMarker bool, wg *sync.WaitGroup) {
+func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, opts streamOptions, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer r.Close()
 
@@ -1521,7 +1570,12 @@ func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, hidePathM
 		chunk, err := reader.ReadString('\n')
 		if chunk != "" {
 			_, _ = buf.WriteString(chunk)
-			if !(hidePathMarker && strings.HasPrefix(strings.TrimSpace(chunk), ytDlpPathMarker)) {
+			line := strings.TrimSpace(chunk)
+			if opts.HidePathMarker && strings.HasPrefix(line, ytDlpPathMarker) {
+				// Internal marker used to capture output path.
+			} else if opts.Progress != nil && strings.HasPrefix(line, ytDlpProgressMarker) {
+				opts.Progress.render(strings.TrimPrefix(line, ytDlpProgressMarker))
+			} else {
 				_, _ = io.WriteString(target, chunk)
 			}
 		}
@@ -1532,6 +1586,117 @@ func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, hidePathM
 			break
 		}
 	}
+}
+
+func newProgressRenderer(out io.Writer) *progressRenderer {
+	file, ok := out.(*os.File)
+	isTTY := false
+	if ok {
+		if info, err := file.Stat(); err == nil {
+			isTTY = (info.Mode() & os.ModeCharDevice) != 0
+		}
+	}
+	return &progressRenderer{
+		out:         out,
+		tty:         isTTY,
+		lastPercent: -1,
+	}
+}
+
+func (p *progressRenderer) render(payload string) {
+	if p == nil || p.out == nil {
+		return
+	}
+
+	percent, speed, eta, ok := parseYtDlpProgressPayload(payload)
+	if !ok {
+		return
+	}
+
+	percentInt := int(percent + 0.5)
+	if percentInt < 0 {
+		percentInt = 0
+	}
+	if percentInt > 100 {
+		percentInt = 100
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.tty {
+		if percentInt == 100 && p.lastPercent == 100 {
+			return
+		}
+		if p.lastPercent >= 0 && percentInt < 100 && percentInt < p.lastPercent+10 {
+			return
+		}
+	}
+
+	bar := renderProgressBar(percentInt, 20)
+	msg := fmt.Sprintf("下载进度 %s %3d%% 速度 %s ETA %s", bar, percentInt, speed, eta)
+	if p.tty {
+		_, _ = io.WriteString(p.out, "\r"+msg)
+	} else {
+		_, _ = io.WriteString(p.out, msg+"\n")
+	}
+	p.lastPercent = percentInt
+	p.hadRender = true
+}
+
+func (p *progressRenderer) finish() {
+	if p == nil || p.out == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.tty && p.hadRender {
+		_, _ = io.WriteString(p.out, "\n")
+	}
+}
+
+func parseYtDlpProgressPayload(payload string) (percent float64, speed string, eta string, ok bool) {
+	parts := strings.Split(payload, "|")
+	if len(parts) < 3 {
+		return 0, "", "", false
+	}
+
+	p := strings.TrimSpace(strings.TrimSuffix(parts[0], "%"))
+	v, err := strconv.ParseFloat(p, 64)
+	if err != nil {
+		return 0, "", "", false
+	}
+
+	speed = strings.TrimSpace(parts[1])
+	eta = strings.TrimSpace(parts[2])
+	if speed == "" {
+		speed = "N/A"
+	}
+	if eta == "" || eta == "NA" {
+		eta = "--:--"
+	}
+	return v, speed, eta, true
+}
+
+func renderProgressBar(percent int, width int) string {
+	if width <= 0 {
+		return "[]"
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	filled := int(float64(width) * float64(percent) / 100.0)
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("=", filled) + strings.Repeat(".", width-filled) + "]"
 }
 
 func withPrependedPath(env []string, dir string) []string {
