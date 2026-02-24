@@ -17,6 +17,7 @@
 package ingest
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,9 +30,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"text/tabwriter"
+	"time"
 
 	"media-ingest/ingest/embedtools"
 	"media-ingest/ingest/platform/console"
@@ -85,6 +89,13 @@ type getOptions struct {
 	JSON         bool
 }
 
+type lsOptions struct {
+	Limit  int
+	Query  string
+	Format string
+	Dedupe bool
+}
+
 type getJSONResult struct {
 	OK           bool   `json:"ok"`
 	ExitCode     int    `json:"exit_code"`
@@ -101,6 +112,22 @@ type ytDlpConfig struct {
 	OutputTemplate   string
 	CaptureMovedPath bool
 	Quiet            bool
+}
+
+type assetRecord struct {
+	AssetID    string `json:"asset_id"`
+	URL        string `json:"url"`
+	Platform   string `json:"platform"`
+	Title      string `json:"title"`
+	OutputPath string `json:"output_path"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type lsJSONResult struct {
+	Total int           `json:"total"`
+	Count int           `json:"count"`
+	Limit int           `json:"limit"`
+	Items []assetRecord `json:"items"`
 }
 
 func Main(args []string) int {
@@ -132,6 +159,14 @@ func Main(args []string) int {
 			return exitUsage
 		}
 		return runGet(opts)
+	case "ls":
+		opts, err := parseLsOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
+			usage()
+			return exitUsage
+		}
+		return runLs(opts)
 	case "auth", "login":
 		if len(args) != 3 {
 			usage()
@@ -153,6 +188,7 @@ func Main(args []string) int {
 func usage() {
 	fmt.Println("用法:")
 	fmt.Println("  mingest get <url> [--out-dir <dir>] [--name-template <tpl>] [--asset-id-only] [--json]")
+	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
 	fmt.Println("get 参数:")
@@ -160,6 +196,12 @@ func usage() {
 	fmt.Println("  --name-template <tpl>     设置输出模板（默认 %(title)s.%(ext)s）")
 	fmt.Println("  --asset-id-only           仅输出 asset_id（便于脚本串联）")
 	fmt.Println("  --json                    输出 JSON 结果")
+	fmt.Println()
+	fmt.Println("ls 参数:")
+	fmt.Println("  --limit <n>               最多返回 n 条（默认 20）")
+	fmt.Println("  --query <text>            关键字过滤（匹配 asset_id/url/title/path/platform）")
+	fmt.Println("  --format <table|json>     输出格式（默认 table）")
+	fmt.Println("  --dedupe                  按 asset_id 去重（仅保留最新一条）")
 	fmt.Println()
 	fmt.Println("平台:")
 	fmt.Println("  - youtube")
@@ -266,6 +308,70 @@ func parseGetOptions(args []string) (getOptions, error) {
 	return opts, nil
 }
 
+func parseLsOptions(args []string) (lsOptions, error) {
+	opts := lsOptions{
+		Limit:  20,
+		Format: "table",
+	}
+
+	var limitProvided bool
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case arg == "--dedupe":
+			opts.Dedupe = true
+		case arg == "--limit":
+			if i+1 >= len(args) {
+				return lsOptions{}, fmt.Errorf("`--limit` 缺少参数")
+			}
+			i++
+			v := strings.TrimSpace(args[i])
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return lsOptions{}, fmt.Errorf("`--limit` 必须是整数: %s", v)
+			}
+			opts.Limit = n
+			limitProvided = true
+		case strings.HasPrefix(arg, "--limit="):
+			v := strings.TrimSpace(strings.TrimPrefix(arg, "--limit="))
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return lsOptions{}, fmt.Errorf("`--limit` 必须是整数: %s", v)
+			}
+			opts.Limit = n
+			limitProvided = true
+		case arg == "--query":
+			if i+1 >= len(args) {
+				return lsOptions{}, fmt.Errorf("`--query` 缺少参数")
+			}
+			i++
+			opts.Query = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--query="):
+			opts.Query = strings.TrimSpace(strings.TrimPrefix(arg, "--query="))
+		case arg == "--format":
+			if i+1 >= len(args) {
+				return lsOptions{}, fmt.Errorf("`--format` 缺少参数")
+			}
+			i++
+			opts.Format = strings.ToLower(strings.TrimSpace(args[i]))
+		case strings.HasPrefix(arg, "--format="):
+			opts.Format = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(arg, "--format=")))
+		case strings.HasPrefix(arg, "-"):
+			return lsOptions{}, fmt.Errorf("不支持的参数: %s", arg)
+		default:
+			return lsOptions{}, fmt.Errorf("不支持的位置参数: %s", arg)
+		}
+	}
+
+	if opts.Format != "table" && opts.Format != "json" {
+		return lsOptions{}, fmt.Errorf("`--format` 仅支持 table 或 json")
+	}
+	if limitProvided && opts.Limit <= 0 {
+		return lsOptions{}, fmt.Errorf("`--limit` 必须大于 0")
+	}
+	return opts, nil
+}
+
 func runGet(opts getOptions) int {
 	u, err := validateURL(opts.TargetURL)
 	if err != nil {
@@ -346,11 +452,11 @@ func runGet(opts getOptions) int {
 	}
 	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新账户登录信息")
 
-	captureOutput := opts.AssetIDOnly || opts.JSON
+	captureOutput := true
 	cfg := ytDlpConfig{
 		OutputTemplate:  outputTemplate,
 		CaptureMovedPath: captureOutput,
-		Quiet:           captureOutput,
+		Quiet:           opts.AssetIDOnly || opts.JSON,
 	}
 	code, movedPaths := runWithAuthFallback(opts.TargetURL, found, p, authSources, cookieFile, cfg)
 	if code != exitOK {
@@ -375,6 +481,10 @@ func runGet(opts getOptions) int {
 	outputPath := firstCapturedPath(movedPaths)
 	if outputPath == "" {
 		msg := "下载成功，但未能解析输出文件路径"
+		if !opts.AssetIDOnly && !opts.JSON {
+			log.Print(msg + "，已跳过资产索引写入")
+			return exitOK
+		}
 		if opts.JSON {
 			printGetJSON(getJSONResult{
 				OK:           false,
@@ -410,8 +520,29 @@ func runGet(opts getOptions) int {
 	}
 
 	if opts.AssetIDOnly {
+		if err := appendAssetRecord(assetRecord{
+			AssetID:    assetID,
+			URL:        opts.TargetURL,
+			Platform:   strings.TrimSpace(p.ID),
+			Title:      filepath.Base(outputPath),
+			OutputPath: outputPath,
+			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			log.Printf("写入资产索引失败（将继续）: %v", err)
+		}
 		fmt.Println(assetID)
 		return exitOK
+	}
+
+	if err := appendAssetRecord(assetRecord{
+		AssetID:    assetID,
+		URL:        opts.TargetURL,
+		Platform:   strings.TrimSpace(p.ID),
+		Title:      filepath.Base(outputPath),
+		OutputPath: outputPath,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		log.Printf("写入资产索引失败（将继续）: %v", err)
 	}
 
 	if opts.JSON {
@@ -454,6 +585,195 @@ func resolveGetOutput(outDir, nameTemplate string) (template string, resolvedOut
 	}
 
 	return filepath.Join(absDir, tpl), absDir, nil
+}
+
+func runLs(opts lsOptions) int {
+	records, err := readAssetRecords()
+	if err != nil {
+		log.Printf("读取资产索引失败: %v", err)
+		return exitDownloadFailed
+	}
+
+	filtered := filterAssetRecords(records, opts.Query)
+	sort.Slice(filtered, func(i, j int) bool {
+		return parseRecordTime(filtered[i]).After(parseRecordTime(filtered[j]))
+	})
+	if opts.Dedupe {
+		filtered = dedupeAssetRecords(filtered)
+	}
+
+	total := len(filtered)
+
+	if len(filtered) > opts.Limit {
+		filtered = filtered[:opts.Limit]
+	}
+
+	if opts.Format == "json" {
+		data, err := json.Marshal(lsJSONResult{
+			Total: total,
+			Count: len(filtered),
+			Limit: opts.Limit,
+			Items: filtered,
+		})
+		if err != nil {
+			log.Printf("JSON 序列化失败: %v", err)
+			return exitDownloadFailed
+		}
+		fmt.Println(string(data))
+		return exitOK
+	}
+
+	printAssetTable(filtered)
+	return exitOK
+}
+
+func filterAssetRecords(in []assetRecord, query string) []assetRecord {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		out := make([]assetRecord, len(in))
+		copy(out, in)
+		return out
+	}
+
+	out := make([]assetRecord, 0, len(in))
+	for _, r := range in {
+		haystack := strings.ToLower(strings.Join([]string{
+			r.AssetID,
+			r.URL,
+			r.Platform,
+			r.Title,
+			r.OutputPath,
+		}, " "))
+		if strings.Contains(haystack, q) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func dedupeAssetRecords(in []assetRecord) []assetRecord {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]assetRecord, 0, len(in))
+	for _, r := range in {
+		id := strings.TrimSpace(r.AssetID)
+		if id == "" {
+			out = append(out, r)
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, r)
+	}
+	return out
+}
+
+func parseRecordTime(r assetRecord) time.Time {
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(r.CreatedAt)); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+func printAssetTable(records []assetRecord) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ASSET_ID\tPLATFORM\tCREATED_AT\tTITLE\tPATH")
+	for _, r := range records {
+		title := strings.TrimSpace(r.Title)
+		if title == "" {
+			title = filepath.Base(r.OutputPath)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			r.AssetID,
+			r.Platform,
+			r.CreatedAt,
+			title,
+			r.OutputPath,
+		)
+	}
+	_ = w.Flush()
+}
+
+func assetsIndexFilePath() (string, error) {
+	base, err := appStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "assets-v1.jsonl"), nil
+}
+
+func appendAssetRecord(rec assetRecord) error {
+	indexPath, err := assetsIndexFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(indexPath), 0o700); err != nil {
+		return err
+	}
+
+	normalized := rec
+	if strings.TrimSpace(normalized.CreatedAt) == "" {
+		normalized.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(normalized.Title) == "" {
+		normalized.Title = filepath.Base(normalized.OutputPath)
+	}
+
+	f, err := os.OpenFile(indexPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	b, err := json.Marshal(normalized)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readAssetRecords() ([]assetRecord, error) {
+	indexPath, err := assetsIndexFilePath()
+	if err != nil {
+		return nil, err
+	}
+	if !fileExists(indexPath) {
+		return []assetRecord{}, nil
+	}
+
+	f, err := os.Open(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make([]assetRecord, 0, 64)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec assetRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if strings.TrimSpace(rec.AssetID) == "" || strings.TrimSpace(rec.OutputPath) == "" {
+			continue
+		}
+		if strings.TrimSpace(rec.Title) == "" {
+			rec.Title = filepath.Base(rec.OutputPath)
+		}
+		out = append(out, rec)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func firstCapturedPath(paths []string) string {
@@ -1124,8 +1444,8 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 		stderrTarget = io.Discard
 	}
 
-	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, &wg)
-	go streamAndCapture(stderrR, stderrTarget, &stderrBuf, &wg)
+	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, cfg.CaptureMovedPath, &wg)
+	go streamAndCapture(stderrR, stderrTarget, &stderrBuf, false, &wg)
 
 	state, waitErr := proc.Wait()
 	wg.Wait()
@@ -1175,10 +1495,26 @@ func extractMovedPaths(stdout string, enabled bool) []string {
 	return out
 }
 
-func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, wg *sync.WaitGroup) {
+func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, hidePathMarker bool, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer r.Close()
-	_, _ = io.Copy(io.MultiWriter(target, buf), r)
+
+	reader := bufio.NewReader(r)
+	for {
+		chunk, err := reader.ReadString('\n')
+		if chunk != "" {
+			_, _ = buf.WriteString(chunk)
+			if !(hidePathMarker && strings.HasPrefix(strings.TrimSpace(chunk), ytDlpPathMarker)) {
+				_, _ = io.WriteString(target, chunk)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			break
+		}
+	}
 }
 
 func withPrependedPath(env []string, dir string) []string {
