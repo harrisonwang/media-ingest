@@ -83,28 +83,28 @@ func runAuth(platform videoPlatform) int {
 	return exitOK
 }
 
-func tryDownloadWithChromeCDP(targetURL string, d deps, platform videoPlatform, cookieCacheFile string) int {
+func tryDownloadWithChromeCDP(targetURL string, d deps, platform videoPlatform, cookieCacheFile string, cfg ytDlpConfig) (int, []string) {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
 		log.Print(err.Error())
-		return exitCookieProblem
+		return exitCookieProblem, nil
 	}
 	profileDir, err := chromeProfileDir()
 	if err != nil {
 		log.Printf("无法确定 Chrome profile 目录: %v", err)
-		return exitCookieProblem
+		return exitCookieProblem, nil
 	}
 
 	cookieFile, cleanup, cookies, err := exportCookiesFromChromeCDP(chromePath, profileDir, platform, true)
 	if err != nil {
 		log.Printf("无法从 Chrome 获取 cookies: %v", err)
-		return exitCookieProblem
+		return exitCookieProblem, nil
 	}
 	defer cleanup()
 
 	if !looksLikeLoggedIn(cookies, platform) {
 		// This is a stronger signal than inferring from yt-dlp output: we didn't even get auth cookies.
-		return exitAuthRequired
+		return exitAuthRequired, nil
 	}
 
 	// Best-effort: refresh the persistent cache so subsequent `mingest get` runs can use it directly.
@@ -115,8 +115,8 @@ func tryDownloadWithChromeCDP(targetURL string, d deps, platform videoPlatform, 
 		}
 	}
 
-	args := buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile)
-	return runYtDlp(d, args, platform)
+	args := buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile, cfg)
+	return runYtDlp(d, args, platform, cfg)
 }
 
 func chromeProfileDir() (string, error) {

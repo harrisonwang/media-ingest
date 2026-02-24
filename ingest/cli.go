@@ -18,6 +18,9 @@ package ingest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -42,6 +46,11 @@ const (
 	exitFFmpegMissing  = 31
 	exitYtDlpMissing   = 32
 	exitDownloadFailed = 40
+)
+
+const (
+	defaultYtDlpOutputTemplate = "%(title)s.%(ext)s"
+	ytDlpPathMarker            = "__MINGEST_PATH__"
 )
 
 type tool struct {
@@ -68,6 +77,32 @@ type authSource struct {
 	Value string
 }
 
+type getOptions struct {
+	TargetURL    string
+	OutDir       string
+	NameTemplate string
+	AssetIDOnly  bool
+	JSON         bool
+}
+
+type getJSONResult struct {
+	OK           bool   `json:"ok"`
+	ExitCode     int    `json:"exit_code"`
+	Error        string `json:"error,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	OutputPath   string `json:"output_path,omitempty"`
+	AssetID      string `json:"asset_id,omitempty"`
+	OutputDir    string `json:"out_dir,omitempty"`
+	NameTemplate string `json:"name_template,omitempty"`
+}
+
+type ytDlpConfig struct {
+	OutputTemplate   string
+	CaptureMovedPath bool
+	Quiet            bool
+}
+
 func Main(args []string) int {
 	log.SetFlags(0)
 	console.EnsureUTF8()
@@ -90,11 +125,13 @@ func Main(args []string) int {
 
 	switch strings.ToLower(strings.TrimSpace(args[1])) {
 	case "get":
-		if len(args) != 3 {
+		opts, err := parseGetOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
 			usage()
 			return exitUsage
 		}
-		return runGet(args[2])
+		return runGet(opts)
 	case "auth", "login":
 		if len(args) != 3 {
 			usage()
@@ -115,8 +152,14 @@ func Main(args []string) int {
 
 func usage() {
 	fmt.Println("用法:")
-	fmt.Println("  mingest get <url>")
+	fmt.Println("  mingest get <url> [--out-dir <dir>] [--name-template <tpl>] [--asset-id-only] [--json]")
 	fmt.Println("  mingest auth <platform>")
+	fmt.Println()
+	fmt.Println("get 参数:")
+	fmt.Println("  --out-dir <dir>           设置下载目录（默认当前工作目录）")
+	fmt.Println("  --name-template <tpl>     设置输出模板（默认 %(title)s.%(ext)s）")
+	fmt.Println("  --asset-id-only           仅输出 asset_id（便于脚本串联）")
+	fmt.Println("  --json                    输出 JSON 结果")
 	fmt.Println()
 	fmt.Println("平台:")
 	fmt.Println("  - youtube")
@@ -166,10 +209,87 @@ func printVersion() {
 	fmt.Printf("mingest %s\n", strings.TrimSpace(version))
 }
 
-func runGet(targetURL string) int {
-	u, err := validateURL(targetURL)
+func parseGetOptions(args []string) (getOptions, error) {
+	opts := getOptions{}
+	var outDirProvided bool
+	var nameTemplateProvided bool
+
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case arg == "--asset-id-only":
+			opts.AssetIDOnly = true
+		case arg == "--json":
+			opts.JSON = true
+		case arg == "--out-dir":
+			if i+1 >= len(args) {
+				return getOptions{}, fmt.Errorf("`--out-dir` 缺少参数")
+			}
+			i++
+			opts.OutDir = strings.TrimSpace(args[i])
+			outDirProvided = true
+		case strings.HasPrefix(arg, "--out-dir="):
+			opts.OutDir = strings.TrimSpace(strings.TrimPrefix(arg, "--out-dir="))
+			outDirProvided = true
+		case arg == "--name-template":
+			if i+1 >= len(args) {
+				return getOptions{}, fmt.Errorf("`--name-template` 缺少参数")
+			}
+			i++
+			opts.NameTemplate = strings.TrimSpace(args[i])
+			nameTemplateProvided = true
+		case strings.HasPrefix(arg, "--name-template="):
+			opts.NameTemplate = strings.TrimSpace(strings.TrimPrefix(arg, "--name-template="))
+			nameTemplateProvided = true
+		case strings.HasPrefix(arg, "-"):
+			return getOptions{}, fmt.Errorf("不支持的参数: %s", arg)
+		default:
+			if opts.TargetURL != "" {
+				return getOptions{}, fmt.Errorf("`mingest get` 仅支持一个 URL")
+			}
+			opts.TargetURL = arg
+		}
+	}
+
+	if strings.TrimSpace(opts.TargetURL) == "" {
+		return getOptions{}, fmt.Errorf("缺少 URL。用法: mingest get <url>")
+	}
+	if opts.AssetIDOnly && opts.JSON {
+		return getOptions{}, fmt.Errorf("`--asset-id-only` 与 `--json` 不能同时使用")
+	}
+	if outDirProvided && strings.TrimSpace(opts.OutDir) == "" {
+		return getOptions{}, fmt.Errorf("`--out-dir` 不能为空")
+	}
+	if nameTemplateProvided && strings.TrimSpace(opts.NameTemplate) == "" {
+		return getOptions{}, fmt.Errorf("`--name-template` 不能为空")
+	}
+	return opts, nil
+}
+
+func runGet(opts getOptions) int {
+	u, err := validateURL(opts.TargetURL)
 	if err != nil {
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:       false,
+				ExitCode: exitUsage,
+				Error:    fmt.Sprintf("输入的 URL 无效: %v", err),
+			})
+		}
 		log.Printf("输入的 URL 无效: %v", err)
+		return exitUsage
+	}
+
+	outputTemplate, outputDir, err := resolveGetOutput(opts.OutDir, opts.NameTemplate)
+	if err != nil {
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:       false,
+				ExitCode: exitUsage,
+				Error:    err.Error(),
+			})
+		}
+		log.Print(err.Error())
 		return exitUsage
 	}
 
@@ -177,8 +297,22 @@ func runGet(targetURL string) int {
 	if err != nil {
 		var depErr dependencyError
 		if errors.As(err, &depErr) {
+			if opts.JSON {
+				printGetJSON(getJSONResult{
+					OK:       false,
+					ExitCode: depErr.ExitCode,
+					Error:    depErr.Message,
+				})
+			}
 			log.Print(depErr.Message)
 			return depErr.ExitCode
+		}
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:       false,
+				ExitCode: exitDownloadFailed,
+				Error:    fmt.Sprintf("依赖检测失败: %v", err),
+			})
 		}
 		log.Printf("依赖检测失败: %v", err)
 		return exitDownloadFailed
@@ -212,7 +346,183 @@ func runGet(targetURL string) int {
 	}
 	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新账户登录信息")
 
-	return runWithAuthFallback(targetURL, found, p, authSources, cookieFile)
+	captureOutput := opts.AssetIDOnly || opts.JSON
+	cfg := ytDlpConfig{
+		OutputTemplate:  outputTemplate,
+		CaptureMovedPath: captureOutput,
+		Quiet:           captureOutput,
+	}
+	code, movedPaths := runWithAuthFallback(opts.TargetURL, found, p, authSources, cookieFile, cfg)
+	if code != exitOK {
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:           false,
+				ExitCode:     code,
+				Error:        "下载失败",
+				URL:          opts.TargetURL,
+				Platform:     strings.TrimSpace(p.ID),
+				OutputDir:    outputDir,
+				NameTemplate: outputTemplate,
+			})
+		}
+		return code
+	}
+
+	if !captureOutput {
+		return exitOK
+	}
+
+	outputPath := firstCapturedPath(movedPaths)
+	if outputPath == "" {
+		msg := "下载成功，但未能解析输出文件路径"
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:           false,
+				ExitCode:     exitDownloadFailed,
+				Error:        msg,
+				URL:          opts.TargetURL,
+				Platform:     strings.TrimSpace(p.ID),
+				OutputDir:    outputDir,
+				NameTemplate: outputTemplate,
+			})
+		}
+		log.Print(msg)
+		return exitDownloadFailed
+	}
+
+	assetID, err := computeAssetID(outputPath)
+	if err != nil {
+		msg := fmt.Sprintf("生成 asset_id 失败: %v", err)
+		if opts.JSON {
+			printGetJSON(getJSONResult{
+				OK:           false,
+				ExitCode:     exitDownloadFailed,
+				Error:        msg,
+				URL:          opts.TargetURL,
+				Platform:     strings.TrimSpace(p.ID),
+				OutputPath:   outputPath,
+				OutputDir:    outputDir,
+				NameTemplate: outputTemplate,
+			})
+		}
+		log.Print(msg)
+		return exitDownloadFailed
+	}
+
+	if opts.AssetIDOnly {
+		fmt.Println(assetID)
+		return exitOK
+	}
+
+	if opts.JSON {
+		printGetJSON(getJSONResult{
+			OK:           true,
+			ExitCode:     exitOK,
+			URL:          opts.TargetURL,
+			Platform:     strings.TrimSpace(p.ID),
+			OutputPath:   outputPath,
+			AssetID:      assetID,
+			OutputDir:    outputDir,
+			NameTemplate: outputTemplate,
+		})
+	}
+
+	return exitOK
+}
+
+func resolveGetOutput(outDir, nameTemplate string) (template string, resolvedOutDir string, err error) {
+	tpl := strings.TrimSpace(nameTemplate)
+	if tpl == "" {
+		tpl = defaultYtDlpOutputTemplate
+	}
+
+	trimmedOutDir := strings.TrimSpace(outDir)
+	if trimmedOutDir == "" {
+		return tpl, "", nil
+	}
+
+	absDir, err := filepath.Abs(trimmedOutDir)
+	if err != nil {
+		return "", "", fmt.Errorf("解析输出目录失败: %w", err)
+	}
+	if err := os.MkdirAll(absDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("创建输出目录失败: %w", err)
+	}
+
+	if filepath.IsAbs(tpl) {
+		return "", "", fmt.Errorf("`--name-template` 为绝对路径时，不可再配合 `--out-dir` 使用")
+	}
+
+	return filepath.Join(absDir, tpl), absDir, nil
+}
+
+func firstCapturedPath(paths []string) string {
+	for _, p := range paths {
+		v := strings.Trim(strings.TrimSpace(p), "\"")
+		if v == "" {
+			continue
+		}
+		abs, err := filepath.Abs(v)
+		if err == nil && fileExists(abs) {
+			return abs
+		}
+		if fileExists(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+func computeAssetID(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	h := sha256.New()
+	_, _ = h.Write([]byte("mingest-asset-v1\n"))
+	_, _ = h.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+	_, _ = h.Write([]byte{'\n'})
+
+	const chunk = 1 << 20 // 1MB
+	buf := make([]byte, chunk)
+
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", err
+	}
+	_, _ = h.Write(buf[:n])
+
+	if info.Size() > int64(chunk) {
+		if _, err := f.Seek(-int64(chunk), io.SeekEnd); err == nil {
+			n, err = io.ReadFull(f, buf)
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return "", err
+			}
+			_, _ = h.Write(buf[:n])
+		}
+	}
+
+	sum := hex.EncodeToString(h.Sum(nil))
+	if len(sum) < 16 {
+		return "", fmt.Errorf("无法生成 asset_id")
+	}
+	return "ast_" + sum[:16], nil
+}
+
+func printGetJSON(v getJSONResult) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("JSON 序列化失败: %v", err)
+		return
+	}
+	fmt.Println(string(data))
 }
 
 func validateURL(raw string) (*url.URL, error) {
@@ -548,11 +858,11 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sources []authSource, cookieFile string) int {
+func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sources []authSource, cookieFile string, cfg ytDlpConfig) (int, []string) {
 	// 0) Fast path: try cached cookies first (no browser DB access).
 	if strings.TrimSpace(cookieFile) != "" {
 		log.Print("认证方式: cookies 缓存 (本地)")
-		code := runYtDlp(d, buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile), platform)
+		code, paths := runYtDlp(d, buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile, cfg), platform, cfg)
 		// Always attempt to filter after yt-dlp touches the cookie jar.
 		if fileExists(cookieFile) {
 			if err := filterCookieFileForPlatform(cookieFile, platform); err != nil {
@@ -560,16 +870,16 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 			}
 		}
 		if code == exitOK {
-			return exitOK
+			return exitOK, paths
 		}
 		// If it's not an auth/cookie issue, browser fallbacks won't help.
 		if !shouldTryNextAuth(code) {
-			return code
+			return code, nil
 		}
 	}
 
 	if len(sources) == 0 {
-		return exitAuthRequired
+		return exitAuthRequired, nil
 	}
 
 	lastCode := exitDownloadFailed
@@ -591,15 +901,15 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 			if err == nil {
 				tmpCookieFile = p
 				tmpCleanup = cleanup
-				args = buildYtDlpArgsWithCookieCache(targetURL, d, src, tmpCookieFile)
+				args = buildYtDlpArgsWithCookieCache(targetURL, d, src, tmpCookieFile, cfg)
 			} else {
 				// Fallback: proceed without temp jar; this loses caching but keeps functionality.
-				args = buildYtDlpArgs(targetURL, d, src)
+				args = buildYtDlpArgs(targetURL, d, src, cfg)
 			}
 		} else {
-			args = buildYtDlpArgsWithCookieCache(targetURL, d, src, cookieFile)
+			args = buildYtDlpArgsWithCookieCache(targetURL, d, src, cookieFile, cfg)
 		}
-		code := runYtDlp(d, args, platform)
+		code, paths := runYtDlp(d, args, platform, cfg)
 		// Best-effort: if the browser attempt produced an authenticated cookie jar, update cache.
 		if tmpCookieFile != "" && fileExists(tmpCookieFile) && strings.TrimSpace(cookieFile) != "" {
 			if err := filterCookieFileForPlatform(tmpCookieFile, platform); err != nil {
@@ -621,20 +931,20 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 			if i > 0 && strings.TrimSpace(os.Getenv("MINGEST_BROWSER")) == "" {
 				log.Printf("提示: 已自动切换并使用 %s 的账户登录信息。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
 			}
-			return code
+			return code, paths
 		}
 		// Prefer Chrome, but on Windows Chrome cookie decryption frequently fails.
 		// When chrome fails, try CDP (Chrome gives us decrypted cookies) before falling back to Firefox.
 		if src.Kind == authKindBrowser && src.Value == "chrome" && shouldTryNextAuth(code) {
 			log.Print("Chrome cookies 失败，尝试使用 Chrome 内部账户登录信息（CDP）...")
-			cdpCode := tryDownloadWithChromeCDP(targetURL, d, platform, cookieFile)
+			cdpCode, cdpPaths := tryDownloadWithChromeCDP(targetURL, d, platform, cookieFile, cfg)
 			if cdpCode == exitOK {
 				if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
 					if err := filterCookieFileForPlatform(cookieFile, platform); err != nil {
 						log.Printf("过滤 cookies 失败（将继续）：%v", err)
 					}
 				}
-				return exitOK
+				return exitOK, cdpPaths
 			}
 			// If CDP cannot provide a working session, guide the user to prepare the managed profile.
 			if cdpCode == exitAuthRequired {
@@ -667,9 +977,9 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 		} else {
 			log.Print("或先执行一次: mingest auth <platform>")
 		}
-		return exitAuthRequired
+		return exitAuthRequired, nil
 	}
-	return lastCode
+	return lastCode, nil
 }
 
 func shouldTryNextAuth(code int) bool {
@@ -684,8 +994,8 @@ func authSourceLabel(src authSource) string {
 	return "unknown"
 }
 
-func buildYtDlpArgs(targetURL string, d deps, src authSource) []string {
-	args := buildYtDlpBaseArgs(d)
+func buildYtDlpArgs(targetURL string, d deps, src authSource, cfg ytDlpConfig) []string {
+	args := buildYtDlpBaseArgs(d, cfg)
 
 	switch src.Kind {
 	case authKindBrowser:
@@ -702,8 +1012,8 @@ func buildYtDlpArgs(targetURL string, d deps, src authSource) []string {
 	return args
 }
 
-func buildYtDlpArgsWithCookieCache(targetURL string, d deps, src authSource, cookieFile string) []string {
-	args := buildYtDlpBaseArgs(d)
+func buildYtDlpArgsWithCookieCache(targetURL string, d deps, src authSource, cookieFile string, cfg ytDlpConfig) []string {
+	args := buildYtDlpBaseArgs(d, cfg)
 
 	switch src.Kind {
 	case authKindBrowser:
@@ -724,13 +1034,18 @@ func buildYtDlpArgsWithCookieCache(targetURL string, d deps, src authSource, coo
 	return args
 }
 
-func buildYtDlpArgsWithCookiesFile(targetURL string, d deps, cookieFile string) []string {
-	args := buildYtDlpBaseArgs(d)
+func buildYtDlpArgsWithCookiesFile(targetURL string, d deps, cookieFile string, cfg ytDlpConfig) []string {
+	args := buildYtDlpBaseArgs(d, cfg)
 	args = append(args, "--cookies", cookieFile, targetURL)
 	return args
 }
 
-func buildYtDlpBaseArgs(d deps) []string {
+func buildYtDlpBaseArgs(d deps, cfg ytDlpConfig) []string {
+	outputTemplate := strings.TrimSpace(cfg.OutputTemplate)
+	if outputTemplate == "" {
+		outputTemplate = defaultYtDlpOutputTemplate
+	}
+
 	ffmpegDir := filepath.Dir(d.FFmpeg.Path)
 	args := []string{
 		"--ffmpeg-location", ffmpegDir,
@@ -743,27 +1058,30 @@ func buildYtDlpBaseArgs(d deps) []string {
 	}
 
 	args = append(args,
-		"--output", "%(title)s.%(ext)s",
+		"--output", outputTemplate,
 		"--embed-thumbnail",
 		"--add-metadata",
 		"-f", "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
 		"--merge-output-format", "mp4",
 	)
+	if cfg.CaptureMovedPath {
+		args = append(args, "--print", "after_move:"+ytDlpPathMarker+"%(filepath)s")
+	}
 	return args
 }
 
-func runYtDlp(d deps, args []string, platform videoPlatform) int {
+func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (int, []string) {
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		log.Printf("创建 stdout 管道失败: %v", err)
-		return exitDownloadFailed
+		return exitDownloadFailed, nil
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
 		log.Printf("创建 stderr 管道失败: %v", err)
-		return exitDownloadFailed
+		return exitDownloadFailed, nil
 	}
 
 	procArgs := append([]string{d.YtDlp.Path}, args...)
@@ -791,7 +1109,7 @@ func runYtDlp(d deps, args []string, platform videoPlatform) int {
 		_ = stdoutR.Close()
 		_ = stderrR.Close()
 		log.Printf("启动 yt-dlp 失败: %v", err)
-		return exitDownloadFailed
+		return exitDownloadFailed, nil
 	}
 
 	var stdoutBuf bytes.Buffer
@@ -799,8 +1117,15 @@ func runYtDlp(d deps, args []string, platform videoPlatform) int {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go streamAndCapture(stdoutR, os.Stdout, &stdoutBuf, &wg)
-	go streamAndCapture(stderrR, os.Stderr, &stderrBuf, &wg)
+	stdoutTarget := io.Writer(os.Stdout)
+	stderrTarget := io.Writer(os.Stderr)
+	if cfg.Quiet {
+		stdoutTarget = io.Discard
+		stderrTarget = io.Discard
+	}
+
+	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, &wg)
+	go streamAndCapture(stderrR, stderrTarget, &stderrBuf, &wg)
 
 	state, waitErr := proc.Wait()
 	wg.Wait()
@@ -808,10 +1133,10 @@ func runYtDlp(d deps, args []string, platform videoPlatform) int {
 
 	if waitErr != nil {
 		log.Printf("等待 yt-dlp 结束失败: %v", waitErr)
-		return exitDownloadFailed
+		return exitDownloadFailed, nil
 	}
 	if state.Success() {
-		return exitOK
+		return exitOK, extractMovedPaths(stdoutBuf.String(), cfg.CaptureMovedPath)
 	}
 
 	code, hint := classifyFailure(combined, platform)
@@ -822,10 +1147,35 @@ func runYtDlp(d deps, args []string, platform videoPlatform) int {
 		log.Printf("yt-dlp 退出码: %d", state.ExitCode())
 	}
 
-	return code
+	return code, nil
 }
 
-func streamAndCapture(r *os.File, target *os.File, buf *bytes.Buffer, wg *sync.WaitGroup) {
+func extractMovedPaths(stdout string, enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 1)
+	for _, line := range strings.Split(stdout, "\n") {
+		v := strings.TrimSpace(line)
+		if !strings.HasPrefix(v, ytDlpPathMarker) {
+			continue
+		}
+		p := strings.Trim(strings.TrimPrefix(v, ytDlpPathMarker), "\"")
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func streamAndCapture(r *os.File, target io.Writer, buf *bytes.Buffer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer r.Close()
 	_, _ = io.Copy(io.MultiWriter(target, buf), r)

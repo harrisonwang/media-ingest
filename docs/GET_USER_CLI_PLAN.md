@@ -1,0 +1,65 @@
+# 面向 get 用户的命令裁剪方案（v1）
+
+## 目标边界
+- 目标用户：先有 URL 再做素材处理的创作者/代剪。
+- 产品边界：先做 `URL -> 下载 -> 处理 -> 导出`，不做全盘 DAM/MAM。
+- `index`：仅作为 `get` 成功后的内部增量步骤，不对外暴露。
+
+## 命令清单
+
+### 1) `mingest auth <platform> [--browser <name>] [--browser-profile <name>] [--json]`
+- `<platform>`：目标平台。当前支持 `youtube`、`bilibili`。
+- `--browser <name>`：指定浏览器，`chrome|firefox|chromium|edge`。
+- `--browser-profile <name>`：指定浏览器 profile，如 `Default`、`Profile 1`。
+- `--json`：JSON 输出，便于脚本处理。
+
+### 2) `mingest get <url> [--out-dir <dir>] [--name-template <tpl>] [--asset-id-only] [--json]`
+- `<url>`：单条视频 URL。
+- `--out-dir <dir>`：下载目录；未指定时使用当前工作目录。
+- `--name-template <tpl>`：yt-dlp 输出模板；未指定时默认 `%(title)s.%(ext)s`。
+- `--asset-id-only`：仅输出下载结果的 `asset_id`（stdout 仅一行，便于下游命令串联）。
+- `--json`：输出结构化结果（包含 `asset_id`、`output_path`、`platform` 等）。
+
+### 3) `mingest ls [--limit <n>] [--query <text>] [--format <table|json>]`
+- `--limit <n>`：最多返回条目数，默认 `20`。
+- `--query <text>`：按标题/来源关键字过滤。
+- `--format <table|json>`：输出格式，默认 `table`。
+
+### 4) `mingest prep <asset_ref> --goal <subtitle|highlights|shorts> [--lang <auto|zh|en>] [--max-clips <n>] [--clip-seconds <sec>] [--subtitle-style <clean|shorts>] [--json]`
+- `<asset_ref>`：`asset_id` 或本地文件路径。
+- `--goal`：处理目标。
+  - `subtitle`：字幕流程优先。
+  - `highlights`：片段提取优先。
+  - `shorts`：竖版切条优先。
+- `--lang`：转写语言，默认 `auto`。
+- `--max-clips <n>`：建议片段数量上限。
+- `--clip-seconds <sec>`：建议片段时长上限。
+- `--subtitle-style <clean|shorts>`：字幕样式模板。
+- `--json`：输出结构化处理结果。
+
+### 5) `mingest export <asset_ref> --to <premiere|resolve> [--with <srt,edl,csv>] [--out-dir <dir>] [--zip] [--json]`
+- `<asset_ref>`：`asset_id` 或本地文件路径。
+- `--to <premiere|resolve>`：目标剪辑软件。
+- `--with <srt,edl,csv>`：导出内容类型（逗号分隔）。
+- `--out-dir <dir>`：导出目录。
+- `--zip`：导出结果压缩为 zip。
+- `--json`：输出结构化导出清单。
+
+### 6) `mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]`
+- `<asset_ref>`：`asset_id` 或本地文件路径。
+- `--target`：按发布目标选择检查规则。
+- `--strict`：启用更严格阈值。
+- `--json`：输出结构化诊断结果。
+
+## P0 / P2
+
+### P0（当前阶段）
+- `auth`
+- `get`（含 `--out-dir`、`--name-template`、`--asset-id-only`、`--json`）
+- `prep`
+- `export`
+- `doctor`
+
+### P2（延后）
+- `mingest get --batch <urls.txt> [--concurrency <n>] [--retry <n>] [--continue-on-error] [--json]`
+  - 说明：当前样本未显示“批量下载”是高频强痛点，因此延后。
