@@ -159,6 +159,14 @@ func Main(args []string) int {
 			return exitUsage
 		}
 		return runGet(opts)
+	case "prep":
+		opts, err := parsePrepOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
+			usage()
+			return exitUsage
+		}
+		return runPrep(opts)
 	case "ls":
 		opts, err := parseLsOptions(args[2:])
 		if err != nil {
@@ -188,6 +196,7 @@ func Main(args []string) int {
 func usage() {
 	fmt.Println("用法:")
 	fmt.Println("  mingest get <url> [--out-dir <dir>] [--name-template <tpl>] [--asset-id-only] [--json]")
+	fmt.Println("  mingest prep <asset_ref> --goal <subtitle|highlights|shorts> [--lang <auto|zh|en>] [--max-clips <n>] [--clip-seconds <sec>] [--subtitle-style <clean|shorts>] [--json]")
 	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
@@ -195,6 +204,14 @@ func usage() {
 	fmt.Println("  --out-dir <dir>           设置下载目录（默认当前工作目录）")
 	fmt.Println("  --name-template <tpl>     设置输出模板（默认 %(title)s.%(ext)s）")
 	fmt.Println("  --asset-id-only           仅输出 asset_id（便于脚本串联）")
+	fmt.Println("  --json                    输出 JSON 结果")
+	fmt.Println()
+	fmt.Println("prep 参数:")
+	fmt.Println("  --goal <v>                处理目标：subtitle|highlights|shorts")
+	fmt.Println("  --lang <v>                语言（默认 auto）")
+	fmt.Println("  --max-clips <n>           建议片段数（默认 subtitle/highlights=5, shorts=3）")
+	fmt.Println("  --clip-seconds <n>        单片段建议时长秒数（默认 subtitle/highlights=45, shorts=30）")
+	fmt.Println("  --subtitle-style <v>      字幕模板风格：clean|shorts（默认 clean）")
 	fmt.Println("  --json                    输出 JSON 结果")
 	fmt.Println()
 	fmt.Println("ls 参数:")
@@ -454,9 +471,9 @@ func runGet(opts getOptions) int {
 
 	captureOutput := true
 	cfg := ytDlpConfig{
-		OutputTemplate:  outputTemplate,
+		OutputTemplate:   outputTemplate,
 		CaptureMovedPath: captureOutput,
-		Quiet:           opts.AssetIDOnly || opts.JSON,
+		Quiet:            opts.AssetIDOnly || opts.JSON,
 	}
 	code, movedPaths := runWithAuthFallback(opts.TargetURL, found, p, authSources, cookieFile, cfg)
 	if code != exitOK {
