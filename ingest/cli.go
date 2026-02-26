@@ -50,6 +50,7 @@ const (
 	exitFFmpegMissing  = 31
 	exitYtDlpMissing   = 32
 	exitDownloadFailed = 40
+	exitDoctorFailed   = 41
 )
 
 const (
@@ -197,6 +198,14 @@ func Main(args []string) int {
 			return exitUsage
 		}
 		return runLs(opts)
+	case "doctor":
+		opts, err := parseDoctorOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
+			usage()
+			return exitUsage
+		}
+		return runDoctor(opts)
 	case "auth", "login":
 		if len(args) != 3 {
 			usage()
@@ -221,6 +230,7 @@ func usage() {
 	fmt.Println("  mingest prep <asset_ref> --goal <subtitle|highlights|shorts> [--lang <auto|zh|en>] [--max-clips <n>] [--clip-seconds <sec>] [--subtitle-style <clean|shorts>] [--json]")
 	fmt.Println("  mingest export <asset_ref> --to <premiere|resolve|capcut> [--with <srt,edl,csv,fcpxml>] [--out-dir <dir>] [--zip] [--json]")
 	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
+	fmt.Println("  mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
 	fmt.Println("get 参数:")
@@ -250,6 +260,11 @@ func usage() {
 	fmt.Println("  --format <table|json>     输出格式（默认 table）")
 	fmt.Println("  --dedupe                  按 asset_id 去重（仅保留最新一条）")
 	fmt.Println()
+	fmt.Println("doctor 参数:")
+	fmt.Println("  --target <v>              发布目标：youtube|bilibili|shorts（默认 youtube）")
+	fmt.Println("  --strict                  启用更严格阈值")
+	fmt.Println("  --json                    输出 JSON 诊断结果")
+	fmt.Println()
 	fmt.Println("平台:")
 	fmt.Println("  - youtube")
 	fmt.Println("  - bilibili")
@@ -274,6 +289,7 @@ func usage() {
 	fmt.Println("  - 31: ffmpeg 缺失（FFMPEG_MISSING）")
 	fmt.Println("  - 32: yt-dlp 缺失（YTDLP_MISSING）")
 	fmt.Println("  - 40: 下载失败（DOWNLOAD_FAILED）")
+	fmt.Println("  - 41: doctor 检查未通过（DOCTOR_FAILED）")
 }
 
 func isHelpArg(v string) bool {

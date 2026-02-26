@@ -24,6 +24,10 @@ mingest get "https://www.bilibili.com/bangumi/play/ep******"
 - 默认下载并合并为 `mp4`，附带元数据并嵌入封面
 - 自动维护 **cookies 缓存**（优先使用；必要时从浏览器读取 cookies 刷新登录状态）
 - Windows 下 Chrome cookies 读取失败时：自动尝试 **CDP**（让 Chrome 在进程内导出明文 cookies，避免读取/解密数据库）
+- 自动维护素材索引（`asset_id`），支持 `mingest ls` 检索
+- 支持 `mingest prep` 生成字幕/片段候选与 `prep-plan.json`
+- 支持 `mingest export` 导出到 Premiere / Resolve / CapCut（可选 `zip`）
+- 支持 `mingest doctor` 做导出前质量闸门（时长、重叠、字幕覆盖、边界切断、重复度）
 
 ## 快速开始
 
@@ -74,6 +78,30 @@ winget install Mingest.Mingest
 
 ```bash
 mingest get "<url>"
+```
+
+查看素材索引：
+
+```bash
+mingest ls --limit 20
+```
+
+预处理（生成片段候选与字幕产物）：
+
+```bash
+mingest prep <asset_ref> --goal shorts
+```
+
+导出到剪辑软件：
+
+```bash
+mingest export <asset_ref> --to capcut --zip
+```
+
+导出前诊断：
+
+```bash
+mingest doctor <asset_ref> --target shorts --strict
 ```
 
 交互登录（一次性准备登录信息，写入 cookies 缓存）：
@@ -153,6 +181,7 @@ Windows 常见情况：
 - `31` `FFMPEG_MISSING`：`ffmpeg`/`ffprobe` 不可用
 - `32` `YTDLP_MISSING`：`yt-dlp` 不可用
 - `40` `DOWNLOAD_FAILED`：下载失败（其它原因）
+- `41` `DOCTOR_FAILED`：`doctor` 检查未通过（存在 FAIL 项）
 
 ## 常见问题
 

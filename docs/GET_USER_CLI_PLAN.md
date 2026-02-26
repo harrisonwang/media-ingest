@@ -4,6 +4,7 @@
 - 目标用户：先有 URL 再做素材处理的创作者/代剪。
 - 产品边界：先做 `URL -> 下载 -> 处理 -> 导出`，不做全盘 DAM/MAM。
 - `index`：仅作为 `get` 成功后的内部增量步骤，不对外暴露。
+- `doctor`：作为导出前质量闸门，不负责“自动选爆款”，负责拦截明显低质量切片。
 
 ## 命令清单
 
@@ -47,9 +48,17 @@
 
 ### 6) `mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]`
 - `<asset_ref>`：`asset_id` 或本地文件路径。
-- `--target`：按发布目标选择检查规则。
-- `--strict`：启用更严格阈值。
+- `--target`：按发布目标选择检查规则（`shorts` 会更关注短时长与重复度）。
+- `--strict`：启用更严格阈值（更容易 fail）。
 - `--json`：输出结构化诊断结果。
+
+检查范围（当前实现）：
+- clips 数量/时间戳合法性/越界
+- 片段时长范围与片段重叠度
+- 字幕来源（真实字幕 or 模板字幕）
+- 字幕覆盖率、边界切断率
+- 片段文本近重复度
+- 是否疑似“均匀采样”模式（提醒切换为“AI 候选 + 人工决策”）
 
 ## P0 / P2
 
@@ -58,7 +67,7 @@
 - `get`（含 `--out-dir`、`--name-template`、`--asset-id-only`、`--json`）
 - `prep`
 - `export`
-- `doctor`
+- `doctor`（质量闸门）
 
 ### P2（延后）
 - `mingest get --batch <urls.txt> [--concurrency <n>] [--retry <n>] [--continue-on-error] [--json]`
