@@ -115,6 +115,7 @@ type ytDlpConfig struct {
 	OutputTemplate   string
 	CaptureMovedPath bool
 	Quiet            bool
+	ProgressOnly     bool
 }
 
 type streamOptions struct {
@@ -551,7 +552,8 @@ func runGet(opts getOptions) int {
 	cfg := ytDlpConfig{
 		OutputTemplate:   outputTemplate,
 		CaptureMovedPath: captureOutput,
-		Quiet:            opts.AssetIDOnly || opts.JSON,
+		Quiet:            opts.JSON,
+		ProgressOnly:     opts.AssetIDOnly && !opts.JSON,
 	}
 	code, movedPaths := runWithAuthFallback(opts.TargetURL, found, p, authSources, cookieFile, cfg)
 	if code != exitOK {
@@ -1546,6 +1548,10 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 		stdoutTarget = io.Discard
 		stderrTarget = io.Discard
 		progress = nil
+	} else if cfg.ProgressOnly {
+		// Keep progress rendering while silencing non-progress yt-dlp logs.
+		stdoutTarget = io.Discard
+		stderrTarget = io.Discard
 	}
 
 	go streamAndCapture(stdoutR, stdoutTarget, &stdoutBuf, streamOptions{
