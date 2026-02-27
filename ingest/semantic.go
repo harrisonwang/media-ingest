@@ -1914,7 +1914,7 @@ func buildSemanticJSONResult(state semanticRunState, opts semanticOptions, exitC
 func printSemanticJSON(v semanticJSONResult) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		logError("JSON 序列化失败", "error", err)
+		logError("json.marshal_failed", "context", "semantic_result", "error", err)
 		return
 	}
 	fmt.Println(string(data))

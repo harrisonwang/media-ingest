@@ -710,7 +710,7 @@ func exportExitWithErr(asJSON bool, exitCode int, msg string) int {
 			Error:    msg,
 		})
 	} else {
-		logError(msg, "exit_code", exitCode)
+		logError("export.failed", "exit_code", exitCode, "detail", msg)
 	}
 	return exitCode
 }
@@ -718,7 +718,7 @@ func exportExitWithErr(asJSON bool, exitCode int, msg string) int {
 func printExportJSON(v exportJSONResult) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		logError("JSON 序列化失败", "error", err)
+		logError("json.marshal_failed", "context", "export_result", "error", err)
 		return
 	}
 	fmt.Println(string(data))

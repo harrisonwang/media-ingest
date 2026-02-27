@@ -17,7 +17,6 @@
 package ingest
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -76,20 +75,4 @@ func logWarn(msg string, args ...any) {
 
 func logError(msg string, args ...any) {
 	slog.Error(msg, args...)
-}
-
-func logDebugf(format string, args ...any) {
-	slog.Debug(fmt.Sprintf(format, args...))
-}
-
-func logInfof(format string, args ...any) {
-	slog.Info(fmt.Sprintf(format, args...))
-}
-
-func logWarnf(format string, args ...any) {
-	slog.Warn(fmt.Sprintf(format, args...))
-}
-
-func logErrorf(format string, args ...any) {
-	slog.Error(fmt.Sprintf(format, args...))
 }

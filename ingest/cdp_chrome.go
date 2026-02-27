@@ -39,64 +39,64 @@ import (
 func runAuth(platform videoPlatform) int {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
-		logError(err.Error())
+		logError("auth.chrome_not_found", "error", err)
 		return exitCookieProblem
 	}
 	profileDir, err := chromeProfileDir()
 	if err != nil {
-		logError("无法确定 Chrome profile 目录", "error", err)
+		logError("auth.chrome_profile_path_resolve_failed", "error", err)
 		return exitCookieProblem
 	}
 	if err := os.MkdirAll(profileDir, 0o700); err != nil {
-		logError("创建 Chrome profile 目录失败", "error", err)
+		logError("auth.chrome_profile_dir_create_failed", "error", err, "path", profileDir)
 		return exitCookieProblem
 	}
 
-	logInfof("将使用 Chrome: %s", chromePath)
-	logInfof("将使用 profile: %s", profileDir)
+	logInfo("auth.chrome_selected", "path", chromePath)
+	logInfo("auth.chrome_profile_selected", "path", profileDir)
 	name := platform.Name
 	if strings.TrimSpace(name) == "" {
 		name = platform.ID
 	}
-	logInfof("即将打开 Chrome 窗口，请在窗口中登录 %s。完成后回到终端按回车继续。", name)
+	logInfo("auth.user_login_prompt", "platform", name)
 
 	cookies, err := chromeAuthViaCDP(chromePath, profileDir, platform)
 	if err != nil {
-		logError("登录失败", "error", err)
+		logError("auth.cdp_login_failed", "error", err, "platform", platform.ID)
 		return exitAuthRequired
 	}
 
 	cookiePath, err := cookiesCacheFilePath(platform)
 	if err != nil {
-		logError("无法确定 cookies 保存路径", "error", err)
+		logError("auth.cookie_cache_path_resolve_failed", "error", err, "platform", platform.ID)
 		return exitCookieProblem
 	}
 	// Best effort: keep the cookie file private. Windows ignores chmod.
 	if err := writeNetscapeCookieFile(cookiePath, cookies, platform.AllowsCookieDomain); err != nil {
-		logError("保存 cookies 失败", "error", err)
+		logError("auth.cookie_cache_write_failed", "error", err, "path", cookiePath)
 		return exitCookieProblem
 	}
 	_ = os.Chmod(cookiePath, 0o600)
 
-	logInfo("账户登录信息已准备好。")
+	logInfo("auth.ready", "path", cookiePath)
 	return exitOK
 }
 
 func tryDownloadWithChromeCDP(targetURL string, d deps, platform videoPlatform, cookieCacheFile string, cfg ytDlpConfig) (int, []string) {
 	chromePath, err := findChromeExecutable()
 	if err != nil {
-		logWarn(err.Error())
+		logWarn("auth.chrome_not_found", "error", err)
 		return exitCookieProblem, nil
 	}
 	profileDir, err := chromeProfileDir()
 	if err != nil {
-		logWarn("无法确定 Chrome profile 目录", "error", err)
+		logWarn("auth.chrome_profile_path_resolve_failed", "error", err)
 		return exitCookieProblem, nil
 	}
 
 	cookieFile, cleanup, cookies, err := exportCookiesFromChromeCDP(chromePath, profileDir, platform, true)
 	if err != nil {
-		logWarn("无法从 Chrome 获取 cookies", "error", err)
+		logWarn("auth.cdp_cookie_export_failed", "error", err)
 		return exitCookieProblem, nil
 	}
 	defer cleanup()
@@ -248,7 +248,7 @@ func chromeAuthViaCDP(chromePath, profileDir string, platform videoPlatform) ([]
 		return nil, err
 	}
 
-	logInfo("提示: 若你要下载需要额外确认/会员等限制内容，请在该 Chrome 窗口中打开目标视频并完成确认后，再回到终端按回车。")
+	logInfo("auth.cdp_manual_verification_prompt")
 
 	reader := bufio.NewReader(os.Stdin)
 	_, _ = reader.ReadString('\n')
