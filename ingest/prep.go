@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/url"
 	"os"
@@ -414,7 +413,7 @@ func prepExitWithErr(asJSON bool, exitCode int, msg string) int {
 			Error:    msg,
 		})
 	} else {
-		log.Print(msg)
+		logError(msg, "exit_code", exitCode)
 	}
 	return exitCode
 }
@@ -1438,7 +1437,7 @@ func roundMillis(v float64) float64 {
 func printPrepJSON(v prepJSONResult) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("JSON 序列化失败: %v", err)
+		logError("JSON 序列化失败", "error", err)
 		return
 	}
 	fmt.Println(string(data))

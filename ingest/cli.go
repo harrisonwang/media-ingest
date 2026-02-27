@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -148,7 +147,7 @@ type lsJSONResult struct {
 }
 
 func Main(args []string) int {
-	log.SetFlags(0)
+	configureLogger()
 	console.EnsureUTF8()
 	defer embedtools.Cleanup()
 
@@ -171,7 +170,7 @@ func Main(args []string) int {
 	case "get":
 		opts, err := parseGetOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "get")
 			usage()
 			return exitUsage
 		}
@@ -179,7 +178,7 @@ func Main(args []string) int {
 	case "prep":
 		opts, err := parsePrepOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "prep")
 			usage()
 			return exitUsage
 		}
@@ -187,7 +186,7 @@ func Main(args []string) int {
 	case "export":
 		opts, err := parseExportOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "export")
 			usage()
 			return exitUsage
 		}
@@ -195,7 +194,7 @@ func Main(args []string) int {
 	case "ls":
 		opts, err := parseLsOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "ls")
 			usage()
 			return exitUsage
 		}
@@ -203,7 +202,7 @@ func Main(args []string) int {
 	case "doctor":
 		opts, err := parseDoctorOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "doctor")
 			usage()
 			return exitUsage
 		}
@@ -211,7 +210,7 @@ func Main(args []string) int {
 	case "semantic":
 		opts, err := parseSemanticOptions(args[2:])
 		if err != nil {
-			log.Print(err.Error())
+			logError(err.Error(), "command", "semantic")
 			usage()
 			return exitUsage
 		}
@@ -223,7 +222,7 @@ func Main(args []string) int {
 		}
 		p, ok := platformByID(args[2])
 		if !ok {
-			log.Printf("不支持的平台: %s", strings.TrimSpace(args[2]))
+			logError("不支持的平台", "platform", strings.TrimSpace(args[2]))
 			usage()
 			return exitUsage
 		}
@@ -241,7 +240,7 @@ func usage() {
 	fmt.Println("  mingest export <asset_ref> --to <premiere|resolve|capcut> [--with <srt,edl,csv,fcpxml>] [--out-dir <dir>] [--zip] [--json]")
 	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
 	fmt.Println("  mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]")
-	fmt.Println("  mingest semantic <asset_ref> [--target <youtube|bilibili|shorts>] [--provider <auto|openai|openrouter>] [--model <name>] [--apply] [--json]")
+	fmt.Println("  mingest semantic <asset_ref> [--target <youtube|bilibili|shorts>] [--provider <auto|openai|openrouter>] [--model <name>] [--visual-diversity <0-1>] [--apply] [--json]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
 	fmt.Println("get 参数:")
@@ -284,6 +283,7 @@ func usage() {
 	fmt.Println("  --api-key <key>           API Key（也可通过环境变量注入）")
 	fmt.Println("  --candidate-limit <n>     Stage A 候选上限（默认 20）")
 	fmt.Println("  --preview-limit <n>       Stage D 预览数量（默认 8）")
+	fmt.Println("  --visual-diversity <0-1>  视觉去重强度（默认 0.5，越大越严格）")
 	fmt.Println("  --top-k <n>               Stage C/E 最终片段数（默认 3）")
 	fmt.Println("  --no-llm                  跳过 Stage B，仅使用规则分")
 	fmt.Println("  --decisions <path>        Stage E 使用指定评审决策文件")
@@ -311,6 +311,8 @@ func usage() {
 	fmt.Println("  - MINGEST_OPENROUTER_API_KEY / OPENROUTER_API_KEY")
 	fmt.Println("  - MINGEST_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1")
 	fmt.Println("  - MINGEST_LLM_MODEL=gpt-4.1-mini|openai/gpt-4.1-mini")
+	fmt.Println("  - MINGEST_LOG_LEVEL=debug|info|warn|error（默认 info）")
+	fmt.Println("  - MINGEST_LOG_FORMAT=text|json（默认 text）")
 	fmt.Println()
 	fmt.Println("退出码:")
 	fmt.Println("  - 20: 需要登录（AUTH_REQUIRED）")
@@ -478,7 +480,7 @@ func runGet(opts getOptions) int {
 				Error:    fmt.Sprintf("输入的 URL 无效: %v", err),
 			})
 		}
-		log.Printf("输入的 URL 无效: %v", err)
+		logError("输入的 URL 无效", "error", err)
 		return exitUsage
 	}
 
@@ -491,7 +493,7 @@ func runGet(opts getOptions) int {
 				Error:    err.Error(),
 			})
 		}
-		log.Print(err.Error())
+		logError("解析输出参数失败", "error", err)
 		return exitUsage
 	}
 
@@ -506,7 +508,7 @@ func runGet(opts getOptions) int {
 					Error:    depErr.Message,
 				})
 			}
-			log.Print(depErr.Message)
+			logError(depErr.Message, "exit_code", depErr.ExitCode)
 			return depErr.ExitCode
 		}
 		if opts.JSON {
@@ -516,7 +518,7 @@ func runGet(opts getOptions) int {
 				Error:    fmt.Sprintf("依赖检测失败: %v", err),
 			})
 		}
-		log.Printf("依赖检测失败: %v", err)
+		logError("依赖检测失败", "error", err)
 		return exitDownloadFailed
 	}
 
@@ -531,7 +533,7 @@ func runGet(opts getOptions) int {
 	cookieFile := ""
 	if strings.TrimSpace(p.ID) != "" {
 		if v, err := cookiesCacheFilePath(p); err != nil {
-			log.Printf("无法确定 cookies 缓存路径: %v", err)
+			logWarn("无法确定 cookies 缓存路径", "platform", p.ID, "error", err)
 		} else {
 			cookieFile = v
 			// Ensure app state dir exists so yt-dlp can dump the cookie jar.
@@ -539,14 +541,14 @@ func runGet(opts getOptions) int {
 		}
 	}
 
-	log.Printf("使用 yt-dlp: %s", found.YtDlp.Path)
-	log.Printf("使用 ffmpeg: %s", found.FFmpeg.Path)
-	log.Printf("使用 ffprobe: %s", found.FFprobe.Path)
-	log.Printf("使用 JS runtime: %s (%s)", found.JSRuntimeID, found.JSRuntime.Path)
+	logInfo("使用工具", "tool", "yt-dlp", "path", found.YtDlp.Path)
+	logInfo("使用工具", "tool", "ffmpeg", "path", found.FFmpeg.Path)
+	logInfo("使用工具", "tool", "ffprobe", "path", found.FFprobe.Path)
+	logInfo("使用工具", "tool", found.JSRuntimeID, "path", found.JSRuntime.Path)
 	if strings.TrimSpace(cookieFile) != "" {
-		log.Printf("将使用 cookies 缓存: %s", cookieFile)
+		logInfo("将使用 cookies 缓存", "path", cookieFile)
 	}
-	log.Print("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新账户登录信息")
+	logInfo("将优先使用 cookies 缓存；必要时从浏览器读取 cookies 刷新账户登录信息")
 
 	captureOutput := true
 	cfg := ytDlpConfig{
@@ -579,7 +581,7 @@ func runGet(opts getOptions) int {
 	if outputPath == "" {
 		msg := "下载成功，但未能解析输出文件路径"
 		if !opts.AssetIDOnly && !opts.JSON {
-			log.Print(msg + "，已跳过资产索引写入")
+			logWarn(msg + "，已跳过资产索引写入")
 			return exitOK
 		}
 		if opts.JSON {
@@ -593,7 +595,7 @@ func runGet(opts getOptions) int {
 				NameTemplate: outputTemplate,
 			})
 		}
-		log.Print(msg)
+		logError(msg)
 		return exitDownloadFailed
 	}
 
@@ -612,7 +614,7 @@ func runGet(opts getOptions) int {
 				NameTemplate: outputTemplate,
 			})
 		}
-		log.Print(msg)
+		logError(msg)
 		return exitDownloadFailed
 	}
 
@@ -625,7 +627,7 @@ func runGet(opts getOptions) int {
 			OutputPath: outputPath,
 			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
-			log.Printf("写入资产索引失败（将继续）: %v", err)
+			logWarn("写入资产索引失败（将继续）", "error", err)
 		}
 		fmt.Println(assetID)
 		return exitOK
@@ -639,7 +641,7 @@ func runGet(opts getOptions) int {
 		OutputPath: outputPath,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
-		log.Printf("写入资产索引失败（将继续）: %v", err)
+		logWarn("写入资产索引失败（将继续）", "error", err)
 	}
 
 	if opts.JSON {
@@ -687,7 +689,7 @@ func resolveGetOutput(outDir, nameTemplate string) (template string, resolvedOut
 func runLs(opts lsOptions) int {
 	records, err := readAssetRecords()
 	if err != nil {
-		log.Printf("读取资产索引失败: %v", err)
+		logError("读取资产索引失败", "error", err)
 		return exitDownloadFailed
 	}
 
@@ -713,7 +715,7 @@ func runLs(opts lsOptions) int {
 			Items: filtered,
 		})
 		if err != nil {
-			log.Printf("JSON 序列化失败: %v", err)
+			logError("JSON 序列化失败", "error", err)
 			return exitDownloadFailed
 		}
 		fmt.Println(string(data))
@@ -936,7 +938,7 @@ func computeAssetID(path string) (string, error) {
 func printGetJSON(v getJSONResult) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("JSON 序列化失败: %v", err)
+		logError("JSON 序列化失败", "error", err)
 		return
 	}
 	fmt.Println(string(data))
@@ -1278,12 +1280,12 @@ func fileExists(path string) bool {
 func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sources []authSource, cookieFile string, cfg ytDlpConfig) (int, []string) {
 	// 0) Fast path: try cached cookies first (no browser DB access).
 	if strings.TrimSpace(cookieFile) != "" {
-		log.Print("认证方式: cookies 缓存 (本地)")
+		logInfo("认证方式: cookies 缓存 (本地)")
 		code, paths := runYtDlp(d, buildYtDlpArgsWithCookiesFile(targetURL, d, cookieFile, cfg), platform, cfg)
 		// Always attempt to filter after yt-dlp touches the cookie jar.
 		if fileExists(cookieFile) {
 			if err := filterCookieFileForPlatform(cookieFile, platform); err != nil {
-				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+				logWarn("过滤 cookies 失败（将继续）", "error", err)
 			}
 		}
 		if code == exitOK {
@@ -1301,7 +1303,7 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 
 	lastCode := exitDownloadFailed
 	for i, src := range sources {
-		log.Printf("认证方式 (%d/%d): %s", i+1, len(sources), authSourceLabel(src))
+		logInfo("认证方式", "current", i+1, "total", len(sources), "source", authSourceLabel(src))
 		args := []string{}
 		tmpCookieFile := ""
 		tmpCleanup := func() {}
@@ -1330,10 +1332,10 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 		// Best-effort: if the browser attempt produced an authenticated cookie jar, update cache.
 		if tmpCookieFile != "" && fileExists(tmpCookieFile) && strings.TrimSpace(cookieFile) != "" {
 			if err := filterCookieFileForPlatform(tmpCookieFile, platform); err != nil {
-				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+				logWarn("过滤 cookies 失败（将继续）", "error", err)
 			} else if ok, err := cookieFileLooksLikeAuthenticated(tmpCookieFile, platform); err == nil && ok {
 				if err := copyFileAtomic(tmpCookieFile, cookieFile); err != nil {
-					log.Printf("更新 cookies 缓存失败（将继续）：%v", err)
+					logWarn("更新 cookies 缓存失败（将继续）", "error", err)
 				}
 			}
 		}
@@ -1341,24 +1343,24 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 		if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
 			// Keep the cache minimal even if yt-dlp added extra domains.
 			if err := filterCookieFileForPlatform(cookieFile, platform); err != nil {
-				log.Printf("过滤 cookies 失败（将继续）：%v", err)
+				logWarn("过滤 cookies 失败（将继续）", "error", err)
 			}
 		}
 		if code == exitOK {
 			if i > 0 && strings.TrimSpace(os.Getenv("MINGEST_BROWSER")) == "" {
-				log.Printf("提示: 已自动切换并使用 %s 的账户登录信息。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
+				logInfof("提示: 已自动切换并使用 %s 的账户登录信息。可设置 MINGEST_BROWSER=%s 以固定使用该浏览器。", src.Value, src.Value)
 			}
 			return code, paths
 		}
 		// Prefer Chrome, but on Windows Chrome cookie decryption frequently fails.
 		// When chrome fails, try CDP (Chrome gives us decrypted cookies) before falling back to Firefox.
 		if src.Kind == authKindBrowser && src.Value == "chrome" && shouldTryNextAuth(code) {
-			log.Print("Chrome cookies 失败，尝试使用 Chrome 内部账户登录信息（CDP）...")
+			logWarn("Chrome cookies 失败，尝试使用 Chrome 内部账户登录信息（CDP）")
 			cdpCode, cdpPaths := tryDownloadWithChromeCDP(targetURL, d, platform, cookieFile, cfg)
 			if cdpCode == exitOK {
 				if strings.TrimSpace(cookieFile) != "" && fileExists(cookieFile) {
 					if err := filterCookieFileForPlatform(cookieFile, platform); err != nil {
-						log.Printf("过滤 cookies 失败（将继续）：%v", err)
+						logWarn("过滤 cookies 失败（将继续）", "error", err)
 					}
 				}
 				return exitOK, cdpPaths
@@ -1369,7 +1371,7 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 				if strings.TrimSpace(platform.ID) != "" {
 					cmd = "mingest auth " + platform.ID
 				}
-				log.Printf("提示: CDP 账户登录信息未能通过当前视频的鉴权（可能未登录/未完成验证/账号受限）。请先执行: %s", cmd)
+				logWarnf("提示: CDP 账户登录信息未能通过当前视频的鉴权（可能未登录/未完成验证/账号受限）。请先执行: %s", cmd)
 				// Keep classification as AUTH_REQUIRED so callers can decide what to do.
 				code = exitAuthRequired
 			} else if cdpCode == exitCookieProblem {
@@ -1380,19 +1382,19 @@ func runWithAuthFallback(targetURL string, d deps, platform videoPlatform, sourc
 		lastCode = code
 
 		if i < len(sources)-1 && shouldTryNextAuth(code) {
-			log.Printf("当前认证方式失败（退出码 %d），尝试下一种认证方式", code)
+			logWarn("当前认证方式失败，尝试下一种认证方式", "exit_code", code)
 			continue
 		}
 		break
 	}
 
 	if shouldTryNextAuth(lastCode) {
-		log.Print("未能获取有效账户登录信息。请先在浏览器登录目标网站，然后重试。")
-		log.Print("若你实际登录在 Firefox，可尝试: MINGEST_BROWSER=firefox mingest get <url>")
+		logError("未能获取有效账户登录信息。请先在浏览器登录目标网站，然后重试。")
+		logError("若你实际登录在 Firefox，可尝试: MINGEST_BROWSER=firefox mingest get <url>")
 		if strings.TrimSpace(platform.ID) != "" {
-			log.Printf("或先执行一次: mingest auth %s", platform.ID)
+			logErrorf("或先执行一次: mingest auth %s", platform.ID)
 		} else {
-			log.Print("或先执行一次: mingest auth <platform>")
+			logError("或先执行一次: mingest auth <platform>")
 		}
 		return exitAuthRequired, nil
 	}
@@ -1497,14 +1499,14 @@ func buildYtDlpBaseArgs(d deps, cfg ytDlpConfig) []string {
 func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (int, []string) {
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		log.Printf("创建 stdout 管道失败: %v", err)
+		logError("创建 stdout 管道失败", "error", err)
 		return exitDownloadFailed, nil
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
-		log.Printf("创建 stderr 管道失败: %v", err)
+		logError("创建 stderr 管道失败", "error", err)
 		return exitDownloadFailed, nil
 	}
 
@@ -1532,7 +1534,7 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stderrR.Close()
-		log.Printf("启动 yt-dlp 失败: %v", err)
+		logError("启动 yt-dlp 失败", "error", err)
 		return exitDownloadFailed, nil
 	}
 
@@ -1570,7 +1572,7 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 	combined := stdoutBuf.String() + "\n" + stderrBuf.String()
 
 	if waitErr != nil {
-		log.Printf("等待 yt-dlp 结束失败: %v", waitErr)
+		logError("等待 yt-dlp 结束失败", "error", waitErr)
 		return exitDownloadFailed, nil
 	}
 	if state.Success() {
@@ -1579,10 +1581,10 @@ func runYtDlp(d deps, args []string, platform videoPlatform, cfg ytDlpConfig) (i
 
 	code, hint := classifyFailure(combined, platform)
 	if hint != "" {
-		log.Println(hint)
+		logWarn(hint)
 	}
 	if code == exitDownloadFailed {
-		log.Printf("yt-dlp 退出码: %d", state.ExitCode())
+		logError("yt-dlp 退出码异常", "exit_code", state.ExitCode())
 	}
 
 	return code, nil
