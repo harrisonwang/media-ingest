@@ -1,0 +1,42 @@
+{
+  "version": "semantic-decision-v1",
+  "target": "shorts",
+  "asset_id": "ast_7e9237fef40d4533",
+  "created_at": "2026-02-27T00:13:26Z",
+  "items": [
+    {
+      "id": "c001",
+      "keep": true,
+      "rank": 1
+    },
+    {
+      "id": "c021",
+      "keep": true,
+      "rank": 2
+    },
+    {
+      "id": "c002",
+      "keep": false
+    },
+    {
+      "id": "c003",
+      "keep": false
+    },
+    {
+      "id": "c004",
+      "keep": false
+    },
+    {
+      "id": "c005",
+      "keep": false
+    },
+    {
+      "id": "c006",
+      "keep": false
+    },
+    {
+      "id": "c007",
+      "keep": false
+    }
+  ]
+}

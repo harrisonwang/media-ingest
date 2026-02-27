@@ -60,6 +60,13 @@
 - 片段文本近重复度
 - 是否疑似“均匀采样”模式（提醒切换为“AI 候选 + 人工决策”）
 
+### 7) `mingest semantic <asset_ref> [--target <youtube|bilibili|shorts>] [--provider <auto|openai|openrouter>] [--model <name>] [--apply] [--json]`
+- `<asset_ref>`：`asset_id` 或本地文件路径。
+- 流程：Stage A-E（候选生成 -> GPT 重排 -> 约束选段 -> 评审包 -> 写回 + doctor）。
+- `--apply`：把最终片段写回 `prep-plan.json`（默认仅生成评审包，不改原 plan）。
+- `--decisions <path>`：指定人工评审后的决策文件。
+- `--provider` / `--model`：支持 OpenAI 与 OpenRouter（OpenAI 兼容接口）。
+
 ## P0 / P2
 
 ### P0（当前阶段）
@@ -68,6 +75,7 @@
 - `prep`
 - `export`
 - `doctor`（质量闸门）
+- `semantic`（语义候选 + 人工决策）
 
 ### P2（延后）
 - `mingest get --batch <urls.txt> [--concurrency <n>] [--retry <n>] [--continue-on-error] [--json]`

@@ -51,12 +51,13 @@
 - `mingest prep <asset_ref> --goal <subtitle|highlights|shorts> [...] [--json]`
 - `mingest export <asset_ref> --to <premiere|resolve|capcut> [--with ...] [--out-dir] [--zip] [--json]`
 - `mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]`
+- `mingest semantic <asset_ref> [--target <youtube|bilibili|shorts>] [--provider <auto|openai|openrouter>] [--model <name>] [--apply] [--json]`
 
 说明：`asset_ref` 支持 `asset_id` 或本地路径。
 
 ## 7. 核心流程（v2）
 ### 7.1 基础流水线
-`auth -> get -> ls -> prep -> doctor -> export`
+`auth -> get -> ls -> prep -> semantic -> doctor -> export`
 
 ### 7.2 `prep` 的定位
 - 生成 clips 候选与字幕相关产物（`prep-plan.json`、`markers.csv`、`subtitle*`）。
@@ -71,11 +72,12 @@
 - 片段近重复度
 - 均匀采样模式告警（提示切换语义候选流程）
 
-### 7.4 语义切片建议工作流（P1）
-1. 基于 `subtitle.srt` 生成语义候选（外部脚本/Agent）。
-2. 人工确认保留片段（轻交互）。
-3. 写回 `prep-plan.json` 的 `clips`。
-4. 执行 `doctor`，通过后再 `export`。
+### 7.4 `semantic` 流程（A-E）
+1. Stage A：规则生成候选窗口（基于字幕）。
+2. Stage B：GPT 语义重排（支持 OpenAI / OpenRouter）。
+3. Stage C：约束选段 + 自动补位。
+4. Stage D：生成评审包（`review.html` + 决策模板 + 预览视频）。
+5. Stage E：可选写回 `prep-plan`，并执行 `doctor` 质量闸门。
 
 ## 8. 数据模型与目录规范（延续 v1）
 ### 8.1 资产索引
@@ -116,12 +118,12 @@
 
 ## 11. 路线图（建议）
 ### P0（已落地）
-- `get / prep / export / ls / doctor` 主流程可用。
+- `get / prep / export / ls / doctor / semantic` 主流程可用。
 
 ### P1（下一步）
-- 语义候选生成脚本（基于字幕）。
-- 轻量人工决策与回写工具。
+- `semantic` 的评审交互增强（更顺滑的人机确认）。
 - `doctor` 增加更多发布目标规则（如 shorts 专项）。
+- 候选质量评估报表与长期指标闭环。
 
 ### P2（延后）
 - 批量任务编排增强（更强并发/续跑策略）。
@@ -129,4 +131,3 @@
 
 ## 12. 一句话定位（v2）
 `mingest` 不是“自动爆款机器”，而是一个面向创作者的 **可验证、可回滚、可导出的剪辑前后处理流水线**。
-

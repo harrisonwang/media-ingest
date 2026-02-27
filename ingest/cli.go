@@ -51,6 +51,7 @@ const (
 	exitYtDlpMissing   = 32
 	exitDownloadFailed = 40
 	exitDoctorFailed   = 41
+	exitSemanticFailed = 42
 )
 
 const (
@@ -206,6 +207,14 @@ func Main(args []string) int {
 			return exitUsage
 		}
 		return runDoctor(opts)
+	case "semantic":
+		opts, err := parseSemanticOptions(args[2:])
+		if err != nil {
+			log.Print(err.Error())
+			usage()
+			return exitUsage
+		}
+		return runSemantic(opts)
 	case "auth", "login":
 		if len(args) != 3 {
 			usage()
@@ -231,6 +240,7 @@ func usage() {
 	fmt.Println("  mingest export <asset_ref> --to <premiere|resolve|capcut> [--with <srt,edl,csv,fcpxml>] [--out-dir <dir>] [--zip] [--json]")
 	fmt.Println("  mingest ls [--limit <n>] [--query <text>] [--format <table|json>] [--dedupe]")
 	fmt.Println("  mingest doctor <asset_ref> [--target <youtube|bilibili|shorts>] [--strict] [--json]")
+	fmt.Println("  mingest semantic <asset_ref> [--target <youtube|bilibili|shorts>] [--provider <auto|openai|openrouter>] [--model <name>] [--apply] [--json]")
 	fmt.Println("  mingest auth <platform>")
 	fmt.Println()
 	fmt.Println("get 参数:")
@@ -265,6 +275,21 @@ func usage() {
 	fmt.Println("  --strict                  启用更严格阈值")
 	fmt.Println("  --json                    输出 JSON 诊断结果")
 	fmt.Println()
+	fmt.Println("semantic 参数:")
+	fmt.Println("  --target <v>              目标场景：youtube|bilibili|shorts（默认 shorts）")
+	fmt.Println("  --provider <v>            LLM 提供方：auto|openai|openrouter（默认 auto）")
+	fmt.Println("  --model <v>               模型名（默认 openai: gpt-4.1-mini / openrouter: openai/gpt-4.1-mini）")
+	fmt.Println("  --base-url <url>          自定义 OpenAI 兼容网关地址（可用于 OpenRouter）")
+	fmt.Println("  --api-key <key>           API Key（也可通过环境变量注入）")
+	fmt.Println("  --candidate-limit <n>     Stage A 候选上限（默认 20）")
+	fmt.Println("  --preview-limit <n>       Stage D 预览数量（默认 8）")
+	fmt.Println("  --top-k <n>               Stage C/E 最终片段数（默认 3）")
+	fmt.Println("  --no-llm                  跳过 Stage B，仅使用规则分")
+	fmt.Println("  --decisions <path>        Stage E 使用指定评审决策文件")
+	fmt.Println("  --apply                   Stage E：写回 prep-plan 并执行 doctor 闸门")
+	fmt.Println("  --strict                  Stage E doctor 使用严格阈值")
+	fmt.Println("  --json                    输出 JSON 结果")
+	fmt.Println()
 	fmt.Println("平台:")
 	fmt.Println("  - youtube")
 	fmt.Println("  - bilibili")
@@ -281,6 +306,10 @@ func usage() {
 	fmt.Println("  - MINGEST_CHROME_PATH=C:\\\\Path\\\\To\\\\chrome.exe")
 	fmt.Println("  - MINGEST_WHISPER_PATH=/path/to/whisper")
 	fmt.Println("  - MINGEST_WHISPER_MODEL=tiny|base|small|medium|large")
+	fmt.Println("  - MINGEST_OPENAI_API_KEY / OPENAI_API_KEY")
+	fmt.Println("  - MINGEST_OPENROUTER_API_KEY / OPENROUTER_API_KEY")
+	fmt.Println("  - MINGEST_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1")
+	fmt.Println("  - MINGEST_LLM_MODEL=gpt-4.1-mini|openai/gpt-4.1-mini")
 	fmt.Println()
 	fmt.Println("退出码:")
 	fmt.Println("  - 20: 需要登录（AUTH_REQUIRED）")
@@ -290,6 +319,7 @@ func usage() {
 	fmt.Println("  - 32: yt-dlp 缺失（YTDLP_MISSING）")
 	fmt.Println("  - 40: 下载失败（DOWNLOAD_FAILED）")
 	fmt.Println("  - 41: doctor 检查未通过（DOCTOR_FAILED）")
+	fmt.Println("  - 42: semantic 流程执行失败（SEMANTIC_FAILED）")
 }
 
 func isHelpArg(v string) bool {

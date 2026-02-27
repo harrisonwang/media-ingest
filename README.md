@@ -28,6 +28,7 @@ mingest get "https://www.bilibili.com/bangumi/play/ep******"
 - 支持 `mingest prep` 生成字幕/片段候选与 `prep-plan.json`
 - 支持 `mingest export` 导出到 Premiere / Resolve / CapCut（可选 `zip`）
 - 支持 `mingest doctor` 做导出前质量闸门（时长、重叠、字幕覆盖、边界切断、重复度）
+- 支持 `mingest semantic` 语义候选流水线（A-E）：候选生成 -> GPT 重排 -> 约束选段 -> 评审包 -> 写回+doctor
 
 ## 快速开始
 
@@ -104,6 +105,18 @@ mingest export <asset_ref> --to capcut --zip
 mingest doctor <asset_ref> --target shorts --strict
 ```
 
+语义候选流水线（默认生成评审包，不直接改 `prep-plan`）：
+
+```bash
+mingest semantic <asset_ref> --target shorts
+```
+
+应用评审结果并写回 `prep-plan`：
+
+```bash
+mingest semantic <asset_ref> --target shorts --apply --decisions <path/to/review-decisions.json>
+```
+
 交互登录（一次性准备登录信息，写入 cookies 缓存）：
 
 ```bash
@@ -153,6 +166,10 @@ Windows 常见情况：
 - `MINGEST_BROWSER_PROFILE=Default|Profile 1|...`
 - `MINGEST_JS_RUNTIME=node|deno`
 - `MINGEST_CHROME_PATH=C:\\Path\\To\\chrome.exe`
+- `MINGEST_OPENAI_API_KEY` / `OPENAI_API_KEY`
+- `MINGEST_OPENROUTER_API_KEY` / `OPENROUTER_API_KEY`
+- `MINGEST_OPENROUTER_BASE_URL`（默认 `https://openrouter.ai/api/v1`）
+- `MINGEST_LLM_MODEL`（如 `gpt-4.1-mini` 或 `openai/gpt-4.1-mini`）
 
 ## 依赖查找顺序
 
@@ -182,6 +199,7 @@ Windows 常见情况：
 - `32` `YTDLP_MISSING`：`yt-dlp` 不可用
 - `40` `DOWNLOAD_FAILED`：下载失败（其它原因）
 - `41` `DOCTOR_FAILED`：`doctor` 检查未通过（存在 FAIL 项）
+- `42` `SEMANTIC_FAILED`：`semantic` 流程执行失败
 
 ## 常见问题
 

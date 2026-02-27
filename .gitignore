@@ -3,3 +3,4 @@ ingest/embedtools/assets/
 docs/research/
 tmp/
 .DS_Store
+.mingest/
