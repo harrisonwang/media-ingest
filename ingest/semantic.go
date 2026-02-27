@@ -17,13 +17,14 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
-	"log"
 	"math"
+	"math/bits"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,27 +41,29 @@ import (
 )
 
 const (
-	defaultSemanticModelOpenAI     = "gpt-4.1-mini"
-	defaultSemanticModelOpenRouter = "openai/gpt-4.1-mini"
-	defaultOpenRouterBaseURL       = "https://openrouter.ai/api/v1"
-	maxSemanticCandidateWindows    = 900
+	defaultSemanticModelOpenAI      = "gpt-4.1-mini"
+	defaultSemanticModelOpenRouter  = "openai/gpt-4.1-mini"
+	defaultOpenRouterBaseURL        = "https://openrouter.ai/api/v1"
+	maxSemanticCandidateWindows     = 900
+	maxSemanticVisualHashCandidates = 48
 )
 
 type semanticOptions struct {
-	AssetRef       string
-	Target         string
-	Provider       string
-	Model          string
-	BaseURL        string
-	APIKey         string
-	CandidateLimit int
-	TopK           int
-	PreviewLimit   int
-	DecisionsPath  string
-	NoLLM          bool
-	Apply          bool
-	Strict         bool
-	JSON           bool
+	AssetRef        string
+	Target          string
+	Provider        string
+	Model           string
+	BaseURL         string
+	APIKey          string
+	CandidateLimit  int
+	TopK            int
+	PreviewLimit    int
+	VisualDiversity float64
+	DecisionsPath   string
+	NoLLM           bool
+	Apply           bool
+	Strict          bool
+	JSON            bool
 }
 
 type semanticSignals struct {
@@ -85,6 +88,7 @@ type semanticCandidate struct {
 	Type          string          `json:"type,omitempty"`
 	Reason        string          `json:"reason,omitempty"`
 	Signals       semanticSignals `json:"signals"`
+	VisualHash    string          `json:"visual_hash,omitempty"`
 	PreviewPath   string          `json:"preview_path,omitempty"`
 }
 
@@ -127,22 +131,23 @@ type semanticArtifacts struct {
 }
 
 type semanticJSONResult struct {
-	OK             bool              `json:"ok"`
-	ExitCode       int               `json:"exit_code"`
-	Error          string            `json:"error,omitempty"`
-	AssetID        string            `json:"asset_id,omitempty"`
-	AssetRef       string            `json:"asset_ref,omitempty"`
-	AssetPath      string            `json:"asset_path,omitempty"`
-	Target         string            `json:"target,omitempty"`
-	Provider       string            `json:"provider,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	UsedLLM        bool              `json:"used_llm"`
-	Applied        bool              `json:"applied"`
-	CandidateCount int               `json:"candidate_count,omitempty"`
-	SelectedCount  int               `json:"selected_count,omitempty"`
-	Artifacts      semanticArtifacts `json:"artifacts,omitempty"`
-	Warnings       []string          `json:"warnings,omitempty"`
-	DoctorSummary  doctorSummary     `json:"doctor_summary,omitempty"`
+	OK              bool              `json:"ok"`
+	ExitCode        int               `json:"exit_code"`
+	Error           string            `json:"error,omitempty"`
+	AssetID         string            `json:"asset_id,omitempty"`
+	AssetRef        string            `json:"asset_ref,omitempty"`
+	AssetPath       string            `json:"asset_path,omitempty"`
+	Target          string            `json:"target,omitempty"`
+	Provider        string            `json:"provider,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	UsedLLM         bool              `json:"used_llm"`
+	Applied         bool              `json:"applied"`
+	CandidateCount  int               `json:"candidate_count,omitempty"`
+	SelectedCount   int               `json:"selected_count,omitempty"`
+	VisualDiversity float64           `json:"visual_diversity,omitempty"`
+	Artifacts       semanticArtifacts `json:"artifacts,omitempty"`
+	Warnings        []string          `json:"warnings,omitempty"`
+	DoctorSummary   doctorSummary     `json:"doctor_summary,omitempty"`
 }
 
 type semanticRunState struct {
@@ -169,11 +174,12 @@ type semanticLLMConfig struct {
 
 func parseSemanticOptions(args []string) (semanticOptions, error) {
 	opts := semanticOptions{
-		Target:         "shorts",
-		Provider:       "auto",
-		CandidateLimit: 20,
-		TopK:           3,
-		PreviewLimit:   8,
+		Target:          "shorts",
+		Provider:        "auto",
+		CandidateLimit:  20,
+		TopK:            3,
+		PreviewLimit:    8,
+		VisualDiversity: 0.50,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -259,6 +265,22 @@ func parseSemanticOptions(args []string) (semanticOptions, error) {
 				return semanticOptions{}, fmt.Errorf("`--preview-limit` 必须是整数")
 			}
 			opts.PreviewLimit = n
+		case arg == "--visual-diversity":
+			if i+1 >= len(args) {
+				return semanticOptions{}, fmt.Errorf("`--visual-diversity` 缺少参数")
+			}
+			i++
+			v, err := strconv.ParseFloat(strings.TrimSpace(args[i]), 64)
+			if err != nil {
+				return semanticOptions{}, fmt.Errorf("`--visual-diversity` 必须是 0-1 的小数")
+			}
+			opts.VisualDiversity = v
+		case strings.HasPrefix(arg, "--visual-diversity="):
+			v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(arg, "--visual-diversity=")), 64)
+			if err != nil {
+				return semanticOptions{}, fmt.Errorf("`--visual-diversity` 必须是 0-1 的小数")
+			}
+			opts.VisualDiversity = v
 		case arg == "--top-k":
 			if i+1 >= len(args) {
 				return semanticOptions{}, fmt.Errorf("`--top-k` 缺少参数")
@@ -311,6 +333,9 @@ func parseSemanticOptions(args []string) (semanticOptions, error) {
 	}
 	if opts.PreviewLimit <= 0 || opts.PreviewLimit > 50 {
 		return semanticOptions{}, fmt.Errorf("`--preview-limit` 需在 1-50")
+	}
+	if opts.VisualDiversity < 0 || opts.VisualDiversity > 1 {
+		return semanticOptions{}, fmt.Errorf("`--visual-diversity` 需在 0-1")
 	}
 	if opts.TopK <= 0 || opts.TopK > 10 {
 		return semanticOptions{}, fmt.Errorf("`--top-k` 需在 1-10")
@@ -374,7 +399,11 @@ func runSemanticPipeline(opts semanticOptions) (semanticRunState, int) {
 
 	// Stage A: 基于字幕生成候选窗口
 	minSec, maxSec := semanticTargetDurationRange(opts.Target)
-	candidates := buildSemanticCandidates(cues, minSec, maxSec)
+	keyframes, keyframeErr := semanticDetectKeyframeBoundaries(asset.OutputPath)
+	if keyframeErr != nil {
+		state.Warnings = append(state.Warnings, fmt.Sprintf("镜头边界检测不可用，使用原字幕边界: %v", keyframeErr))
+	}
+	candidates := buildSemanticCandidates(cues, minSec, maxSec, keyframes)
 	candidates = semanticSelectTopCandidates(candidates, opts.CandidateLimit)
 	if len(candidates) == 0 {
 		state.Warnings = append(state.Warnings, "无法生成候选片段（字幕内容可能过短或不可解析）")
@@ -385,6 +414,7 @@ func runSemanticPipeline(opts semanticOptions) (semanticRunState, int) {
 		"created_at":    time.Now().UTC().Format(time.RFC3339),
 		"subtitle_path": subtitlePath,
 		"target":        opts.Target,
+		"keyframes":     len(keyframes),
 		"items":         candidates,
 	}); err != nil {
 		state.Warnings = append(state.Warnings, fmt.Sprintf("写入 Stage A 结果失败: %v", err))
@@ -423,26 +453,33 @@ func runSemanticPipeline(opts semanticOptions) (semanticRunState, int) {
 	if state.Model == "" {
 		state.Model = defaultSemanticModelOpenAI
 	}
+	visualHashCount := semanticAnnotateVisualHashes(asset.OutputPath, candidates)
+	if visualHashCount == 0 {
+		state.Warnings = append(state.Warnings, "视觉去重不可用（未能生成候选帧哈希），将仅使用语义/时间多样性")
+	} else if visualHashCount < len(candidates)/3 {
+		state.Warnings = append(state.Warnings, fmt.Sprintf("仅 %d/%d 个候选生成了视觉哈希，视觉去重能力受限", visualHashCount, len(candidates)))
+	}
 
 	// Stage C: 约束选 3 段
-	selected := semanticPickFinalCandidates(candidates, opts.TopK, opts.Target)
+	selected := semanticPickFinalCandidates(candidates, opts.TopK, opts.Target, opts.VisualDiversity)
 	if len(selected) == 0 {
 		state.Warnings = append(state.Warnings, "Stage C 未能选出有效片段")
 		return state, exitSemanticFailed
 	}
 	if err := writeJSONFile(artifacts.StageCPath, map[string]interface{}{
-		"version":    "semantic-c-v1",
-		"created_at": time.Now().UTC().Format(time.RFC3339),
-		"target":     opts.Target,
-		"top_k":      opts.TopK,
-		"items":      selected,
+		"version":          "semantic-c-v1",
+		"created_at":       time.Now().UTC().Format(time.RFC3339),
+		"target":           opts.Target,
+		"top_k":            opts.TopK,
+		"visual_diversity": opts.VisualDiversity,
+		"items":            selected,
 	}); err != nil {
 		state.Warnings = append(state.Warnings, fmt.Sprintf("写入 Stage C 结果失败: %v", err))
 		return state, exitSemanticFailed
 	}
 
 	// Stage D: 预览+评审包
-	previewCandidates := semanticTopPreviewCandidates(candidates, selected, opts.PreviewLimit)
+	previewCandidates := semanticTopPreviewCandidates(candidates, selected, opts.PreviewLimit, opts.Target, opts.VisualDiversity)
 	if err := semanticGeneratePreviewFiles(asset.OutputPath, previewCandidates, artifacts.PreviewDir); err != nil {
 		state.Warnings = append(state.Warnings, fmt.Sprintf("生成预览视频失败（将继续，使用原始时间戳评审）: %v", err))
 	}
@@ -465,7 +502,7 @@ func runSemanticPipeline(opts semanticOptions) (semanticRunState, int) {
 		if decisionsPath == "" {
 			decisionsPath = artifacts.ReviewDecisions
 		}
-		finalSelected, err := semanticApplyDecisions(decisionsPath, candidates, selected, opts.TopK, opts.Target)
+		finalSelected, err := semanticApplyDecisions(decisionsPath, candidates, selected, opts.TopK, opts.Target, opts.VisualDiversity)
 		if err != nil {
 			state.Warnings = append(state.Warnings, fmt.Sprintf("读取评审决策失败: %v", err))
 			return state, exitSemanticFailed
@@ -598,7 +635,7 @@ func semanticRerankWithLLM(candidates []semanticCandidate, target string, cfg se
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+	params := openai.ChatCompletionNewParams{
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(userPrompt),
@@ -606,9 +643,26 @@ func semanticRerankWithLLM(candidates []semanticCandidate, target string, cfg se
 		Model:       cfg.Model,
 		Temperature: openai.Float(0.2),
 		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
-			OfJSONObject: &shared.ResponseFormatJSONObjectParam{Type: "json_object"},
+			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
+					Name:        "semantic_rerank_result",
+					Description: openai.String("为每个候选返回语义评分与类型"),
+					Strict:      openai.Bool(true),
+					Schema:      semanticLLMResponseSchema(),
+				},
+			},
 		},
-	})
+	}
+	resp, err := client.Chat.Completions.New(ctx, params)
+	if err != nil {
+		// 某些网关对 json_schema 支持不完整，回退到 json_object 并继续做强校验解析。
+		if semanticShouldFallbackJSONMode(err) {
+			params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
+				OfJSONObject: &shared.ResponseFormatJSONObjectParam{Type: "json_object"},
+			}
+			resp, err = client.Chat.Completions.New(ctx, params)
+		}
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -620,20 +674,168 @@ func semanticRerankWithLLM(candidates []semanticCandidate, target string, cfg se
 		return nil, "", errors.New("模型返回为空")
 	}
 
-	var parsed semanticLLMResponse
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		fixed := extractFirstJSONObject(raw)
-		if fixed == "" {
-			return nil, raw, fmt.Errorf("解析 JSON 失败: %w", err)
-		}
-		if err := json.Unmarshal([]byte(fixed), &parsed); err != nil {
-			return nil, raw, fmt.Errorf("解析 JSON 失败: %w", err)
-		}
+	parsed, err := semanticParseLLMResponse(raw)
+	if err != nil {
+		return nil, raw, err
 	}
 	if len(parsed.Items) == 0 {
 		return nil, raw, errors.New("模型返回 items 为空")
 	}
 	return parsed.Items, raw, nil
+}
+
+func semanticShouldFallbackJSONMode(err error) bool {
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "json_schema") {
+		return true
+	}
+	if strings.Contains(msg, "response_format") {
+		return true
+	}
+	if strings.Contains(msg, "unsupported") && strings.Contains(msg, "schema") {
+		return true
+	}
+	return false
+}
+
+func semanticLLMResponseSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"items"},
+		"properties": map[string]interface{}{
+			"items": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"id", "semantic_score", "type", "reason"},
+					"properties": map[string]interface{}{
+						"id": map[string]interface{}{
+							"type": "string",
+						},
+						"semantic_score": map[string]interface{}{
+							"type":    "number",
+							"minimum": 0,
+							"maximum": 1,
+						},
+						"type": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"hook", "insight", "controversy"},
+						},
+						"reason": map[string]interface{}{
+							"type": "string",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func semanticParseLLMResponse(raw string) (semanticLLMResponse, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return semanticLLMResponse{}, errors.New("模型返回为空")
+	}
+	normalized := raw
+	if !strings.HasPrefix(normalized, "{") {
+		if fixed := extractFirstJSONObject(normalized); fixed != "" {
+			normalized = fixed
+		}
+	}
+
+	var parsed semanticLLMResponse
+	if err := json.Unmarshal([]byte(normalized), &parsed); err == nil && len(parsed.Items) > 0 {
+		return semanticNormalizeLLMItems(parsed), nil
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(normalized), &top); err != nil {
+		fixed := extractFirstJSONObject(raw)
+		if fixed == "" || fixed == normalized {
+			return semanticLLMResponse{}, fmt.Errorf("解析 JSON 失败: %w", err)
+		}
+		return semanticParseLLMResponse(fixed)
+	}
+	itemsRaw, ok := top["items"]
+	if !ok || len(itemsRaw) == 0 {
+		return semanticLLMResponse{}, errors.New("模型返回缺少 items 字段")
+	}
+	items, err := semanticParseLLMItems(itemsRaw)
+	if err != nil {
+		return semanticLLMResponse{}, err
+	}
+	if len(items) == 0 {
+		return semanticLLMResponse{}, errors.New("模型返回 items 为空")
+	}
+	return semanticNormalizeLLMItems(semanticLLMResponse{Items: items}), nil
+}
+
+func semanticParseLLMItems(raw json.RawMessage) ([]semanticLLMItem, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, errors.New("items 为空")
+	}
+
+	var direct []semanticLLMItem
+	if err := json.Unmarshal(raw, &direct); err == nil && len(direct) > 0 {
+		return direct, nil
+	}
+
+	var one semanticLLMItem
+	if err := json.Unmarshal(raw, &one); err == nil && strings.TrimSpace(one.ID) != "" {
+		return []semanticLLMItem{one}, nil
+	}
+
+	var strVal string
+	if err := json.Unmarshal(raw, &strVal); err == nil {
+		strVal = strings.TrimSpace(strVal)
+		if strVal == "" {
+			return nil, errors.New("items 字符串为空")
+		}
+		return semanticParseLLMItems(json.RawMessage(strVal))
+	}
+
+	var rawList []json.RawMessage
+	if err := json.Unmarshal(raw, &rawList); err == nil {
+		items := make([]semanticLLMItem, 0, len(rawList))
+		for _, entry := range rawList {
+			entry = bytes.TrimSpace(entry)
+			if len(entry) == 0 {
+				continue
+			}
+			parsedEntry, err := semanticParseLLMItems(entry)
+			if err != nil {
+				continue
+			}
+			items = append(items, parsedEntry...)
+		}
+		if len(items) > 0 {
+			return items, nil
+		}
+	}
+	return nil, errors.New("items 格式无效（需为对象数组）")
+}
+
+func semanticNormalizeLLMItems(in semanticLLMResponse) semanticLLMResponse {
+	items := make([]semanticLLMItem, 0, len(in.Items))
+	for _, item := range in.Items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		items = append(items, semanticLLMItem{
+			ID:            id,
+			SemanticScore: clamp01(item.SemanticScore),
+			Type:          normalizeSemanticType(item.Type, "insight"),
+			Reason:        strings.TrimSpace(item.Reason),
+		})
+	}
+	return semanticLLMResponse{Items: items}
 }
 
 func applySemanticLLMScores(candidates []semanticCandidate, llmItems []semanticLLMItem) []semanticCandidate {
@@ -676,7 +878,7 @@ func applySemanticFallbackScores(candidates []semanticCandidate) []semanticCandi
 	return out
 }
 
-func buildSemanticCandidates(cues []subtitleCue, minSec, maxSec float64) []semanticCandidate {
+func buildSemanticCandidates(cues []subtitleCue, minSec, maxSec float64, keyframes []float64) []semanticCandidate {
 	clean := make([]subtitleCue, 0, len(cues))
 	for _, cue := range cues {
 		t := strings.TrimSpace(cue.Text)
@@ -706,7 +908,8 @@ func buildSemanticCandidates(cues []subtitleCue, minSec, maxSec float64) []seman
 			}
 			b.WriteString(clean[j].Text)
 			end := clean[j].EndSec
-			dur := end - start
+			clipStart, clipEnd := semanticSnapCandidateToBoundaries(start, end, minSec, maxSec, keyframes)
+			dur := clipEnd - clipStart
 			if dur > maxSec+1.0 {
 				break
 			}
@@ -721,8 +924,8 @@ func buildSemanticCandidates(cues []subtitleCue, minSec, maxSec float64) []seman
 			base := semanticBaseScore(signals)
 			out = append(out, semanticCandidate{
 				ID:            fmt.Sprintf("w%03d", len(out)+1),
-				StartSec:      roundMillis(start),
-				EndSec:        roundMillis(end),
+				StartSec:      roundMillis(clipStart),
+				EndSec:        roundMillis(clipEnd),
 				DurationSec:   roundMillis(dur),
 				CueStartIndex: i,
 				CueEndIndex:   j,
@@ -738,6 +941,98 @@ func buildSemanticCandidates(cues []subtitleCue, minSec, maxSec float64) []seman
 		}
 	}
 	return out
+}
+
+func semanticSnapCandidateToBoundaries(start, end, minSec, maxSec float64, keyframes []float64) (float64, float64) {
+	if len(keyframes) == 0 {
+		return start, end
+	}
+	snappedStart := semanticNearestBoundary(start, keyframes, 0.40)
+	snappedEnd := semanticNearestBoundary(end, keyframes, 0.40)
+	if snappedEnd <= snappedStart+0.20 {
+		return start, end
+	}
+	dur := snappedEnd - snappedStart
+	if dur < minSec-0.80 || dur > maxSec+1.20 {
+		return start, end
+	}
+	return snappedStart, snappedEnd
+}
+
+func semanticNearestBoundary(value float64, boundaries []float64, maxShift float64) float64 {
+	if len(boundaries) == 0 || maxShift <= 0 {
+		return value
+	}
+	idx := sort.SearchFloat64s(boundaries, value)
+	best := value
+	bestDelta := maxShift + 1
+	check := func(i int) {
+		if i < 0 || i >= len(boundaries) {
+			return
+		}
+		delta := math.Abs(boundaries[i] - value)
+		if delta <= maxShift && delta < bestDelta {
+			best = boundaries[i]
+			bestDelta = delta
+		}
+	}
+	check(idx)
+	check(idx - 1)
+	return best
+}
+
+func semanticDetectKeyframeBoundaries(assetPath string) ([]float64, error) {
+	ffprobePath, ok := detectSemanticFFprobe()
+	if !ok {
+		return nil, errors.New("未找到 ffprobe")
+	}
+	args := []string{
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-skip_frame", "nokey",
+		"-show_entries", "frame=best_effort_timestamp_time",
+		"-of", "csv=p=0",
+		assetPath,
+	}
+	cmd := exec.Command(ffprobePath, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(out), "\n")
+	keyframes := make([]float64, 0, len(lines)+1)
+	seen := make(map[int64]struct{}, len(lines)+1)
+	push := func(v float64) {
+		if v < 0 {
+			return
+		}
+		ms := int64(math.Round(v * 1000))
+		if _, ok := seen[ms]; ok {
+			return
+		}
+		seen[ms] = struct{}{}
+		keyframes = append(keyframes, roundMillis(v))
+	}
+	push(0)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if comma := strings.Index(line, ","); comma >= 0 {
+			line = strings.TrimSpace(line[:comma])
+		}
+		sec, err := strconv.ParseFloat(line, 64)
+		if err != nil {
+			continue
+		}
+		push(sec)
+	}
+	sort.Float64s(keyframes)
+	if len(keyframes) <= 1 {
+		return nil, errors.New("关键帧数量不足")
+	}
+	return keyframes, nil
 }
 
 func semanticScoreSignals(text string, durationSec float64) (semanticSignals, string) {
@@ -811,29 +1106,120 @@ func semanticSelectTopCandidates(candidates []semanticCandidate, limit int) []se
 		return candidates[i].BaseScore > candidates[j].BaseScore
 	})
 
+	minSec, maxSec := semanticTimelineBounds(candidates)
+	span := maxSec - minSec
+	bucketCount := semanticCandidateBucketCount(limit, span)
+	bucketQuota := int(math.Ceil(float64(limit) / float64(bucketCount)))
+	bucketHits := make([]int, bucketCount)
+
 	out := make([]semanticCandidate, 0, limit)
-	for _, c := range candidates {
-		dup := false
-		for _, kept := range out {
-			timeClose := math.Abs(kept.StartSec-c.StartSec) < 1.2 && math.Abs(kept.EndSec-c.EndSec) < 1.2
-			textSim := doctorJaccardSimilarity(kept.Text, c.Text) > 0.93
-			if timeClose || textSim {
-				dup = true
+	seen := make(map[string]struct{}, limit*2)
+
+	for pass := 0; pass < 2 && len(out) < limit; pass++ {
+		for _, c := range candidates {
+			key := semanticCandidateKey(c)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			dup := false
+			for _, kept := range out {
+				if semanticIsNearDuplicateCandidate(kept, c) {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+			bucket := semanticBucketIndex(semanticCandidateMidpoint(c), minSec, maxSec, bucketCount)
+			if pass == 0 && bucketHits[bucket] >= bucketQuota {
+				continue
+			}
+			out = append(out, c)
+			seen[key] = struct{}{}
+			if pass == 0 {
+				bucketHits[bucket]++
+			}
+			if len(out) >= limit {
 				break
 			}
-		}
-		if dup {
-			continue
-		}
-		out = append(out, c)
-		if len(out) >= limit {
-			break
 		}
 	}
 	for i := range out {
 		out[i].ID = fmt.Sprintf("c%03d", i+1)
 	}
 	return out
+}
+
+func semanticTimelineBounds(candidates []semanticCandidate) (float64, float64) {
+	if len(candidates) == 0 {
+		return 0, 0
+	}
+	minSec := candidates[0].StartSec
+	maxSec := candidates[0].EndSec
+	for _, c := range candidates[1:] {
+		if c.StartSec < minSec {
+			minSec = c.StartSec
+		}
+		if c.EndSec > maxSec {
+			maxSec = c.EndSec
+		}
+	}
+	return minSec, maxSec
+}
+
+func semanticCandidateBucketCount(limit int, span float64) int {
+	buckets := limit / 4
+	if buckets < 4 {
+		buckets = 4
+	}
+	if buckets > 10 {
+		buckets = 10
+	}
+	if span < 80 && buckets > 4 {
+		buckets = 4
+	}
+	if span > 900 && buckets < 6 {
+		buckets = 6
+	}
+	return buckets
+}
+
+func semanticBucketIndex(sec, minSec, maxSec float64, bucketCount int) int {
+	if bucketCount <= 1 || maxSec <= minSec {
+		return 0
+	}
+	ratio := (sec - minSec) / (maxSec - minSec)
+	idx := int(math.Floor(ratio * float64(bucketCount)))
+	if idx < 0 {
+		return 0
+	}
+	if idx >= bucketCount {
+		return bucketCount - 1
+	}
+	return idx
+}
+
+func semanticCandidateKey(c semanticCandidate) string {
+	return fmt.Sprintf("%d:%d:%.3f:%.3f", c.CueStartIndex, c.CueEndIndex, c.StartSec, c.EndSec)
+}
+
+func semanticIsNearDuplicateCandidate(a, b semanticCandidate) bool {
+	startClose := math.Abs(a.StartSec-b.StartSec) < 2.5
+	endClose := math.Abs(a.EndSec-b.EndSec) < 2.5
+	if startClose && endClose {
+		return true
+	}
+
+	textSim := doctorJaccardSimilarity(a.Text, b.Text)
+	if textSim > 0.90 {
+		return true
+	}
+	overlap := doctorOverlapRatio(
+		prepClip{StartSec: a.StartSec, EndSec: a.EndSec, DurationSec: a.DurationSec},
+		prepClip{StartSec: b.StartSec, EndSec: b.EndSec, DurationSec: b.DurationSec},
+	)
+	return overlap > 0.72 && textSim > 0.82
 }
 
 func semanticTargetDurationRange(target string) (float64, float64) {
@@ -845,67 +1231,287 @@ func semanticTargetDurationRange(target string) (float64, float64) {
 	}
 }
 
-func semanticPickFinalCandidates(candidates []semanticCandidate, topK int, target string) []semanticCandidate {
+func semanticPickFinalCandidates(candidates []semanticCandidate, topK int, target string, visualDiversity float64) []semanticCandidate {
 	if len(candidates) == 0 || topK <= 0 {
 		return nil
 	}
 	threshold := doctorThresholdFor(target, false)
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].FinalScore == candidates[j].FinalScore {
-			return candidates[i].BaseScore > candidates[j].BaseScore
+	return semanticSelectDiverseCandidates(candidates, nil, topK, threshold, visualDiversity)
+}
+
+func semanticSelectDiverseCandidates(candidates, seed []semanticCandidate, topK int, threshold doctorThreshold, visualDiversity float64) []semanticCandidate {
+	if topK <= 0 || len(candidates) == 0 {
+		return nil
+	}
+	pool := append([]semanticCandidate(nil), candidates...)
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].FinalScore == pool[j].FinalScore {
+			return pool[i].BaseScore > pool[j].BaseScore
 		}
-		return candidates[i].FinalScore > candidates[j].FinalScore
+		return pool[i].FinalScore > pool[j].FinalScore
 	})
 
 	selected := make([]semanticCandidate, 0, topK)
-	usedIDs := make(map[string]struct{}, topK)
-	for _, c := range candidates {
+	used := make(map[string]struct{}, topK*2)
+	for _, c := range seed {
 		if len(selected) >= topK {
 			break
 		}
 		if c.DurationSec < threshold.ClipMinSec || c.DurationSec > threshold.ClipMaxSec {
 			continue
 		}
-		if !semanticCanAddCandidate(selected, c, threshold) {
+		if !semanticCanAddCandidate(selected, c, threshold, visualDiversity) {
+			continue
+		}
+		key := semanticCandidateKey(c)
+		if _, ok := used[key]; ok {
 			continue
 		}
 		selected = append(selected, c)
-		usedIDs[c.ID] = struct{}{}
+		used[key] = struct{}{}
 	}
-	if len(selected) < topK {
-		for _, c := range candidates {
-			if len(selected) >= topK {
+
+	minSec, maxSec := semanticTimelineBounds(pool)
+	for _, c := range selected {
+		if c.StartSec < minSec {
+			minSec = c.StartSec
+		}
+		if c.EndSec > maxSec {
+			maxSec = c.EndSec
+		}
+	}
+	span := math.Max(1.0, maxSec-minSec)
+	bucketCount := semanticSelectionBucketCount(topK)
+	phases := semanticSelectionThresholdPhases(threshold)
+
+	for phaseIdx, phaseThreshold := range phases {
+		for len(selected) < topK {
+			bestIdx := -1
+			bestScore := -1.0
+			buckets := semanticSelectedBuckets(selected, minSec, maxSec, bucketCount)
+			for idx, c := range pool {
+				key := semanticCandidateKey(c)
+				if _, ok := used[key]; ok {
+					continue
+				}
+				if c.DurationSec < phaseThreshold.ClipMinSec || c.DurationSec > phaseThreshold.ClipMaxSec {
+					continue
+				}
+				if !semanticCanAddCandidate(selected, c, phaseThreshold, visualDiversity) {
+					continue
+				}
+				novelty := semanticNoveltyScore(selected, c, span, visualDiversity)
+				score := 0.74*c.FinalScore + 0.26*novelty
+				bucket := semanticBucketIndex(semanticCandidateMidpoint(c), minSec, maxSec, bucketCount)
+				if _, ok := buckets[bucket]; !ok {
+					score += 0.10
+					if phaseIdx > 0 {
+						score += 0.04
+					}
+				} else if phaseIdx == 0 {
+					score -= 0.02
+				}
+				if score > bestScore {
+					bestScore = score
+					bestIdx = idx
+				}
+			}
+			if bestIdx < 0 {
 				break
 			}
-			if _, ok := usedIDs[c.ID]; ok {
+			chosen := pool[bestIdx]
+			selected = append(selected, chosen)
+			used[semanticCandidateKey(chosen)] = struct{}{}
+		}
+		if len(selected) >= topK {
+			return selected
+		}
+	}
+
+	// 最后兜底：在可用候选中优先选“与已选最远”的片段，避免补位继续挤在同一簇。
+	for len(selected) < topK {
+		bestIdx := -1
+		bestDistance := -1.0
+		buckets := semanticSelectedBuckets(selected, minSec, maxSec, bucketCount)
+		for idx, c := range pool {
+			key := semanticCandidateKey(c)
+			if _, ok := used[key]; ok {
+				continue
+			}
+			if c.DurationSec < threshold.ClipMinSec || c.DurationSec > threshold.ClipMaxSec {
 				continue
 			}
 			if !semanticCanAddCandidate(selected, c, doctorThreshold{
-				MaxOverlapRatio:       0.35,
-				MaxNearDuplicateScore: 0.92,
-			}) {
+				ClipMinSec:            threshold.ClipMinSec,
+				ClipMaxSec:            threshold.ClipMaxSec,
+				MaxOverlapRatio:       0.55,
+				MaxNearDuplicateScore: 0.97,
+			}, visualDiversity) {
 				continue
 			}
-			selected = append(selected, c)
-			usedIDs[c.ID] = struct{}{}
+			distance := semanticMinMidpointDistance(selected, c)
+			bucket := semanticBucketIndex(semanticCandidateMidpoint(c), minSec, maxSec, bucketCount)
+			if _, ok := buckets[bucket]; !ok {
+				distance += span * 0.20
+			}
+			if distance > bestDistance {
+				bestDistance = distance
+				bestIdx = idx
+			}
 		}
+		if bestIdx < 0 {
+			break
+		}
+		chosen := pool[bestIdx]
+		selected = append(selected, chosen)
+		used[semanticCandidateKey(chosen)] = struct{}{}
 	}
 	return selected
 }
 
-func semanticCanAddCandidate(selected []semanticCandidate, candidate semanticCandidate, threshold doctorThreshold) bool {
+func semanticSelectionBucketCount(topK int) int {
+	count := topK * 3
+	if count < 6 {
+		count = 6
+	}
+	if count > 12 {
+		count = 12
+	}
+	return count
+}
+
+func semanticSelectionThresholdPhases(base doctorThreshold) []doctorThreshold {
+	return []doctorThreshold{
+		base,
+		{
+			ClipMinSec:            base.ClipMinSec,
+			ClipMaxSec:            base.ClipMaxSec,
+			MaxOverlapRatio:       math.Min(0.35, base.MaxOverlapRatio+0.12),
+			MaxNearDuplicateScore: math.Min(0.90, base.MaxNearDuplicateScore+0.08),
+		},
+		{
+			ClipMinSec:            base.ClipMinSec,
+			ClipMaxSec:            base.ClipMaxSec,
+			MaxOverlapRatio:       0.45,
+			MaxNearDuplicateScore: 0.95,
+		},
+	}
+}
+
+func semanticSelectedBuckets(selected []semanticCandidate, minSec, maxSec float64, bucketCount int) map[int]struct{} {
+	buckets := make(map[int]struct{}, len(selected))
+	for _, c := range selected {
+		bucket := semanticBucketIndex(semanticCandidateMidpoint(c), minSec, maxSec, bucketCount)
+		buckets[bucket] = struct{}{}
+	}
+	return buckets
+}
+
+func semanticCandidateMidpoint(c semanticCandidate) float64 {
+	return (c.StartSec + c.EndSec) / 2.0
+}
+
+func semanticMinMidpointDistance(selected []semanticCandidate, c semanticCandidate) float64 {
+	if len(selected) == 0 {
+		return math.MaxFloat64
+	}
+	mid := semanticCandidateMidpoint(c)
+	minDistance := math.MaxFloat64
 	for _, s := range selected {
-		if doctorOverlapRatio(prepClip{StartSec: s.StartSec, EndSec: s.EndSec, DurationSec: s.DurationSec}, prepClip{StartSec: candidate.StartSec, EndSec: candidate.EndSec, DurationSec: candidate.DurationSec}) > threshold.MaxOverlapRatio {
+		d := math.Abs(mid - semanticCandidateMidpoint(s))
+		if d < minDistance {
+			minDistance = d
+		}
+	}
+	return minDistance
+}
+
+func semanticNoveltyScore(selected []semanticCandidate, c semanticCandidate, timelineSpan float64, visualDiversity float64) float64 {
+	if len(selected) == 0 {
+		return 1.0
+	}
+	maxTextSim := 0.0
+	maxOverlap := 0.0
+	maxVisualSim := 0.0
+	hasVisual := false
+	minDistance := semanticMinMidpointDistance(selected, c)
+	for _, s := range selected {
+		sim := doctorJaccardSimilarity(s.Text, c.Text)
+		if sim > maxTextSim {
+			maxTextSim = sim
+		}
+		overlap := doctorOverlapRatio(
+			prepClip{StartSec: s.StartSec, EndSec: s.EndSec, DurationSec: s.DurationSec},
+			prepClip{StartSec: c.StartSec, EndSec: c.EndSec, DurationSec: c.DurationSec},
+		)
+		if overlap > maxOverlap {
+			maxOverlap = overlap
+		}
+		if visualSim, ok := semanticVisualSimilarity(s.VisualHash, c.VisualHash); ok {
+			hasVisual = true
+			if visualSim > maxVisualSim {
+				maxVisualSim = visualSim
+			}
+		}
+	}
+	timeScale := math.Max(18.0, timelineSpan/5.0)
+	timeNovelty := clamp01(minDistance / timeScale)
+	textNovelty := clamp01(1.0 - maxTextSim)
+	overlapNovelty := clamp01(1.0 - maxOverlap)
+	if hasVisual {
+		visualNovelty := clamp01(1.0 - maxVisualSim)
+		visualWeight := semanticVisualNoveltyWeight(visualDiversity)
+		remaining := 1.0 - visualWeight
+		timeWeight := remaining * (0.32 / 0.76)
+		textWeight := remaining * (0.30 / 0.76)
+		overlapWeight := remaining - timeWeight - textWeight
+		return clamp01(timeWeight*timeNovelty + textWeight*textNovelty + overlapWeight*overlapNovelty + visualWeight*visualNovelty)
+	}
+	return clamp01(0.42*timeNovelty + 0.38*textNovelty + 0.20*overlapNovelty)
+}
+
+func semanticCanAddCandidate(selected []semanticCandidate, candidate semanticCandidate, threshold doctorThreshold, visualDiversity float64) bool {
+	maxVisualSim, minVisualOverlap := semanticVisualSimilarityGate(visualDiversity)
+	for _, s := range selected {
+		overlap := doctorOverlapRatio(
+			prepClip{StartSec: s.StartSec, EndSec: s.EndSec, DurationSec: s.DurationSec},
+			prepClip{StartSec: candidate.StartSec, EndSec: candidate.EndSec, DurationSec: candidate.DurationSec},
+		)
+		if overlap > threshold.MaxOverlapRatio {
 			return false
 		}
 		if doctorJaccardSimilarity(s.Text, candidate.Text) > threshold.MaxNearDuplicateScore {
 			return false
 		}
+		if visualSim, ok := semanticVisualSimilarity(s.VisualHash, candidate.VisualHash); ok {
+			if visualSim > maxVisualSim && overlap > minVisualOverlap {
+				return false
+			}
+		}
 	}
 	return true
 }
 
-func semanticTopPreviewCandidates(candidates, selected []semanticCandidate, previewLimit int) []semanticCandidate {
+func semanticVisualSimilarityGate(visualDiversity float64) (maxSimilarity float64, minOverlap float64) {
+	level := clamp01(visualDiversity)
+	// Keep current behavior around 0.50; allow stricter dedupe as value approaches 1.
+	maxSimilarity = 0.99 - 0.08*level
+	minOverlap = 0.24 - 0.18*level
+	if minOverlap < 0.05 {
+		minOverlap = 0.05
+	}
+	return maxSimilarity, minOverlap
+}
+
+func semanticVisualNoveltyWeight(visualDiversity float64) float64 {
+	level := clamp01(visualDiversity)
+	return 0.14 + 0.20*level
+}
+
+func semanticTopPreviewCandidates(candidates, selected []semanticCandidate, previewLimit int, target string, visualDiversity float64) []semanticCandidate {
+	if previewLimit <= 0 {
+		return nil
+	}
 	out := make([]semanticCandidate, 0, previewLimit)
 	seen := make(map[string]struct{}, previewLimit)
 
@@ -916,7 +1522,28 @@ func semanticTopPreviewCandidates(candidates, selected []semanticCandidate, prev
 			return out
 		}
 	}
+
+	remaining := make([]semanticCandidate, 0, len(candidates))
 	for _, c := range candidates {
+		if _, ok := seen[c.ID]; ok {
+			continue
+		}
+		remaining = append(remaining, c)
+	}
+	if len(remaining) == 0 {
+		return out
+	}
+
+	need := previewLimit - len(out)
+	threshold := doctorThresholdFor(target, false)
+	previewThreshold := doctorThreshold{
+		ClipMinSec:            threshold.ClipMinSec,
+		ClipMaxSec:            threshold.ClipMaxSec,
+		MaxOverlapRatio:       math.Min(0.62, threshold.MaxOverlapRatio+0.40),
+		MaxNearDuplicateScore: math.Min(0.94, threshold.MaxNearDuplicateScore+0.14),
+	}
+	mixed := semanticSelectDiverseCandidates(remaining, out, len(out)+need, previewThreshold, visualDiversity)
+	for _, c := range mixed {
 		if len(out) >= previewLimit {
 			break
 		}
@@ -979,6 +1606,97 @@ func detectSemanticFFmpeg() (string, bool) {
 	exeDir, _ := executableDir()
 	wd, _ := os.Getwd()
 	return findBinary("ffmpeg", wd, exeDir)
+}
+
+func detectSemanticFFprobe() (string, bool) {
+	exeDir, _ := executableDir()
+	wd, _ := os.Getwd()
+	return findBinary("ffprobe", wd, exeDir)
+}
+
+func semanticAnnotateVisualHashes(assetPath string, candidates []semanticCandidate) int {
+	ffmpegPath, ok := detectSemanticFFmpeg()
+	if !ok || len(candidates) == 0 {
+		return 0
+	}
+	limit := len(candidates)
+	if limit > maxSemanticVisualHashCandidates {
+		limit = maxSemanticVisualHashCandidates
+	}
+	success := 0
+	for i := 0; i < limit; i++ {
+		mid := semanticCandidateMidpoint(candidates[i])
+		hash, err := semanticExtractFrameDHash(ffmpegPath, assetPath, mid)
+		if err != nil {
+			continue
+		}
+		candidates[i].VisualHash = hash
+		success++
+	}
+	return success
+}
+
+func semanticExtractFrameDHash(ffmpegPath, assetPath string, sec float64) (string, error) {
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-ss", fmt.Sprintf("%.3f", sec),
+		"-i", assetPath,
+		"-frames:v", "1",
+		"-vf", "scale=9:8,format=gray",
+		"-f", "rawvideo",
+		"-",
+	}
+	cmd := exec.Command(ffmpegPath, args...)
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < 72 {
+		return "", errors.New("帧数据不足")
+	}
+	hash := semanticDHashGray9x8(raw)
+	return fmt.Sprintf("%016x", hash), nil
+}
+
+func semanticDHashGray9x8(raw []byte) uint64 {
+	const (
+		w = 9
+		h = 8
+	)
+	var hash uint64
+	bit := 0
+	for y := 0; y < h; y++ {
+		row := y * w
+		for x := 0; x < w-1; x++ {
+			left := raw[row+x]
+			right := raw[row+x+1]
+			if left > right {
+				hash |= uint64(1) << uint(63-bit)
+			}
+			bit++
+		}
+	}
+	return hash
+}
+
+func semanticVisualSimilarity(aHash, bHash string) (float64, bool) {
+	aHash = strings.TrimSpace(aHash)
+	bHash = strings.TrimSpace(bHash)
+	if len(aHash) != 16 || len(bHash) != 16 {
+		return 0, false
+	}
+	a, err := strconv.ParseUint(aHash, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	b, err := strconv.ParseUint(bHash, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	diff := bits.OnesCount64(a ^ b)
+	distance := float64(diff) / 64.0
+	return clamp01(1.0 - distance), true
 }
 
 func writeSemanticReviewHTML(path string, candidates, selected []semanticCandidate, decisionsPath string) error {
@@ -1055,7 +1773,7 @@ func semanticBuildDecisionTemplate(assetID, target string, candidates, selected 
 	}
 }
 
-func semanticApplyDecisions(path string, candidates, selected []semanticCandidate, topK int, target string) ([]semanticCandidate, error) {
+func semanticApplyDecisions(path string, candidates, selected []semanticCandidate, topK int, target string, visualDiversity float64) ([]semanticCandidate, error) {
 	decisionBytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -1105,31 +1823,14 @@ func semanticApplyDecisions(path string, candidates, selected []semanticCandidat
 	})
 
 	threshold := doctorThresholdFor(target, false)
-	final := make([]semanticCandidate, 0, topK)
-	for _, c := range keep {
-		if len(final) >= topK {
-			break
-		}
-		if !semanticCanAddCandidate(final, c, threshold) {
+	pool := make([]semanticCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if _, blocked := drop[c.ID]; blocked {
 			continue
 		}
-		final = append(final, c)
+		pool = append(pool, c)
 	}
-	if len(final) < topK {
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].FinalScore > candidates[j].FinalScore })
-		for _, c := range candidates {
-			if len(final) >= topK {
-				break
-			}
-			if _, blocked := drop[c.ID]; blocked {
-				continue
-			}
-			if !semanticCanAddCandidate(final, c, threshold) {
-				continue
-			}
-			final = append(final, c)
-		}
-	}
+	final := semanticSelectDiverseCandidates(pool, keep, topK, threshold, visualDiversity)
 	if len(final) == 0 {
 		return nil, errors.New("决策后没有可用片段")
 	}
@@ -1180,20 +1881,21 @@ func writeJSONFile(path string, v interface{}) error {
 func buildSemanticJSONResult(state semanticRunState, opts semanticOptions, exitCode int) semanticJSONResult {
 	ok := exitCode == exitOK
 	result := semanticJSONResult{
-		OK:             ok,
-		ExitCode:       exitCode,
-		AssetID:        strings.TrimSpace(state.Asset.AssetID),
-		AssetRef:       strings.TrimSpace(opts.AssetRef),
-		AssetPath:      strings.TrimSpace(state.Asset.OutputPath),
-		Target:         opts.Target,
-		Provider:       state.Provider,
-		Model:          state.Model,
-		UsedLLM:        state.UsedLLM,
-		Applied:        opts.Apply && state.Artifacts.AppliedPlanPath != "",
-		CandidateCount: len(state.Candidates),
-		SelectedCount:  len(state.Selected),
-		Artifacts:      state.Artifacts,
-		Warnings:       state.Warnings,
+		OK:              ok,
+		ExitCode:        exitCode,
+		AssetID:         strings.TrimSpace(state.Asset.AssetID),
+		AssetRef:        strings.TrimSpace(opts.AssetRef),
+		AssetPath:       strings.TrimSpace(state.Asset.OutputPath),
+		Target:          opts.Target,
+		Provider:        state.Provider,
+		Model:           state.Model,
+		UsedLLM:         state.UsedLLM,
+		Applied:         opts.Apply && state.Artifacts.AppliedPlanPath != "",
+		CandidateCount:  len(state.Candidates),
+		SelectedCount:   len(state.Selected),
+		VisualDiversity: opts.VisualDiversity,
+		Artifacts:       state.Artifacts,
+		Warnings:        state.Warnings,
 	}
 	if !ok && len(state.Warnings) > 0 {
 		result.Error = state.Warnings[len(state.Warnings)-1]
@@ -1212,7 +1914,7 @@ func buildSemanticJSONResult(state semanticRunState, opts semanticOptions, exitC
 func printSemanticJSON(v semanticJSONResult) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("JSON 序列化失败: %v", err)
+		logError("JSON 序列化失败", "error", err)
 		return
 	}
 	fmt.Println(string(data))
@@ -1231,6 +1933,7 @@ func printSemanticHuman(state semanticRunState, opts semanticOptions, exitCode i
 		fmt.Printf("asset_path: %s\n", state.Asset.OutputPath)
 	}
 	fmt.Printf("target: %s\n", opts.Target)
+	fmt.Printf("visual_diversity: %.2f\n", opts.VisualDiversity)
 	fmt.Printf("provider: %s\n", firstNonEmpty(state.Provider, "rule-only"))
 	fmt.Printf("model: %s\n", firstNonEmpty(state.Model, "-"))
 	fmt.Printf("used_llm: %v\n", state.UsedLLM)
